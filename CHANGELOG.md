@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.14.0 - 2026-11-15
+
+- Wakes can be scheduled at a local clock time. `wake_set(at: "19:00", body)` fires at the next 19:00, and `repeat: "daily"` fires every day at that time, including across daylight-saving changes, where a fixed `repeat_every_seconds: 86400` drifts by an hour. The wake keeps the time zone of the server that created it. On a day when the time does not exist (spring forward) the wake skips that day; when it happens twice (fall back) it fires at the first. A daily wake fires at most once per local date. `wake_update` changes `at` and `repeat`, and `wake_get` and `wake_list` show `at`, `repeat` and `time_zone`. `delay_seconds` and `repeat_every_seconds` are unchanged. This release adds a database migration for the new schedule columns.
+- New `hive pad <name> --export` writes the pad to a revision-stamped temp file and prints its path without opening an editor.
+- `hive pad <name> --save <file>` now always checks a revision. A file without the `.r<N>.md` marker needs `--revision <n>`, the revision you edited; before, such a file was saved over whatever was current. A successful save removes only hive's own temp export and keeps any other file.
+- Documentation updates across the handoff, doctor, profile and tools pages.
+- Updated `hono` and `@hono/node-server`.
+- After upgrading, restart every hive session and the lead. A session started before the upgrade refuses `at` and `repeat`.
+
 ## 1.13.0 - 2026-11-12
 
 - A lead can start its own handoff. Run `hive lead-handoff --pad <id> --revision <n>` without `--request` after writing the `hive-lead-handoff` pad, and hive restarts the lead's pane with a fresh session that receives the pad. It works without a turn budget and with `auto_handoff: false`. An existing active handoff is refused. Claude Code leads only; a Codex lead is refused before any request is recorded. This release adds a database migration that allows the new manual handoff reason.
