@@ -120,6 +120,132 @@ after(async () => {
 });
 
 describe("question tools, over real MCP", () => {
+  it("question_ask cuts an over-long header at a word boundary and reports it", { skip }, async () => {
+    const made = await asker.call("question_ask", freeText({ header: "Scheduling dep" }));
+    assert.equal(made.header_truncated, "Scheduling");
+    assert.equal((await asker.call("question_get", { question_id: made.question_id })).header, "Scheduling");
+
+    const multibyte = await asker.call("question_ask", freeText({ header: "中中中中中中中中😀 extra" }));
+    assert.equal(multibyte.header_truncated, "中中中中中中中中😀");
+    assert.equal([...multibyte.header_truncated].length, 9);
+  });
+
+  it("an over-long header whose 13th character is a space keeps the full 12-character prefix", { skip }, async () => {
+    const made = await asker.call("question_ask", freeText({ header: "Release gate fix" }));
+    assert.equal(made.header_truncated, "Release gate");
+    assert.equal((await asker.call("question_get", { question_id: made.question_id })).header, "Release gate");
+  });
+
+  it("question_ask hard-cuts a header whose first word is over 12", { skip }, async () => {
+    const made = await asker.call("question_ask", freeText({ header: "abcdefghijklmnop rest" }));
+    assert.equal(made.header_truncated, "abcdefghijkl");
+  });
+
+  it("question_ask counts header limits in code points", { skip }, async () => {
+    const header = `${"😀".repeat(12)} extra`;
+    const made = await asker.call("question_ask", freeText({ header }));
+    assert.equal(made.header_truncated, "😀".repeat(12));
+    assert.equal([...made.header_truncated].length, 12);
+  });
+
+  it("a 12-character header is stored as given with no header_truncated", { skip }, async () => {
+    const header = "123456789012";
+    const made = await asker.call("question_ask", freeText({ header }));
+    assert.equal(Object.hasOwn(made, "header_truncated"), false);
+    assert.equal((await asker.call("question_get", { question_id: made.question_id })).header, header);
+  });
+
+  it("question_update cuts an over-long header and reports it", { skip }, async () => {
+    const made = await asker.call("question_ask", freeText());
+    const updated = await asker.call("question_update", { question_id: made.question_id, header: "Scheduling dep" });
+    assert.equal(updated.header_truncated, "Scheduling");
+    assert.equal((await asker.call("question_get", { question_id: made.question_id })).header, "Scheduling");
+  });
+
+  it("an option without recommended is stored as recommended false", { skip }, async () => {
+    const options = [
+      { label: "Opt0", description: "description 0", recommended: true },
+      { label: "Opt1", description: "description 1" },
+    ];
+    const made = await asker.call("question_ask", choice({ options }));
+    assert.deepEqual((await asker.call("question_get", { question_id: made.question_id })).options, [
+      { ...options[0] },
+      { ...options[1], recommended: false },
+    ]);
+
+    const edited = await asker.call("question_update", {
+      question_id: made.question_id,
+      options: [options[0], { label: "Opt1", description: "description 1" }],
+    });
+    assert.equal(edited.question_id, made.question_id);
+    assert.deepEqual((await asker.call("question_get", { question_id: made.question_id })).options, [
+      { ...options[0] },
+      { ...options[1], recommended: false },
+    ]);
+  });
+
+  it("omitting recommended on every option is still refused", { skip }, async () => {
+    const options = opts(2).map(({ recommended, ...option }) => option);
+    assert.match(await refusal(asker, "question_ask", choice({ options })), /exactly one option must be recommended, got 0/);
+  });
+
+  it("two recommended options are still refused", { skip }, async () => {
+    assert.match(
+      await refusal(asker, "question_ask", choice({ options: opts(2).map((option) => ({ ...option, recommended: true })) })),
+      /exactly one option must be recommended, got 2/,
+    );
+  });
+
+  it("a repeat answer matching the stored one succeeds with already_answered and queues no wake", { skip }, async () => {
+    const made = await asker.call("question_ask", freeText());
+    const first = await human.call("question_answer", { question_id: made.question_id, answer: "  Keep it  ", notes: "decision recorded" });
+    assert.equal(typeof first.wake_id, "number");
+    const wakesAfterFirst = wakeCount();
+    const repeat = await other.call("question_answer", { question_id: made.question_id, answer: "Keep it" });
+    assert.deepEqual(repeat, { question_id: made.question_id, wake_id: null, already_answered: true });
+    assert.equal(wakeCount(), wakesAfterFirst);
+    const sameNotes = await other.call("question_answer", {
+      question_id: made.question_id,
+      answer: "Keep it",
+      notes: "decision recorded",
+    });
+    assert.deepEqual(sameNotes, { question_id: made.question_id, wake_id: null, already_answered: true });
+    const blankNotes = await other.call("question_answer", { question_id: made.question_id, answer: "Keep it", notes: "  \t " });
+    assert.deepEqual(blankNotes, { question_id: made.question_id, wake_id: null, already_answered: true });
+    assert.equal(wakeCount(), wakesAfterFirst);
+  });
+
+  it("a different repeat answer still conflicts", { skip }, async () => {
+    const made = await asker.call("question_ask", freeText());
+    await human.call("question_answer", { question_id: made.question_id, answer: "Keep it" });
+    assert.match(await refusal(other, "question_answer", { question_id: made.question_id, answer: "Different" }), /QUESTION_STATE_CONFLICT/);
+  });
+
+  it("a matching answer with new notes conflicts and names the notes", { skip }, async () => {
+    const made = await asker.call("question_ask", freeText());
+    await human.call("question_answer", { question_id: made.question_id, answer: "Keep it" });
+    assert.match(await refusal(other, "question_answer", { question_id: made.question_id, answer: "Keep it", notes: "new notes" }), /answer matches but the notes differ/);
+  });
+
+  it("answering a withdrawn question still conflicts", { skip }, async () => {
+    const made = await asker.call("question_ask", freeText());
+    await asker.call("question_update", { question_id: made.question_id, state: "withdrawn" });
+    assert.match(await refusal(other, "question_answer", { question_id: made.question_id, answer: "Keep it" }), /QUESTION_STATE_CONFLICT/);
+  });
+
+  it("two identical question_answer calls race to one write and one wake", { skip }, async () => {
+    const made = await asker.call("question_ask", freeText());
+    const before = wakeCount();
+    const results = await Promise.all([
+      human.call("question_answer", { question_id: made.question_id, answer: "Ship it" }),
+      other.call("question_answer", { question_id: made.question_id, answer: "Ship it" }),
+    ]);
+    assert.equal(results.filter((result) => result.already_answered === true).length, 1);
+    assert.equal(results.filter((result) => typeof result.wake_id === "number").length, 1);
+    assert.equal(wakeCount(), before + 1);
+    assert.equal(db.prepare("SELECT answer FROM questions WHERE id = ?").get(made.question_id).answer, "Ship it");
+  });
+
   it("question records survive a server restart", { skip }, async () => {
     const made = await asker.call("question_ask", choice({ ref: { kind: "todo", number: 9001 } }));
     assert.equal(made.created, true);
@@ -194,11 +320,9 @@ describe("question tools, over real MCP", () => {
     const bad = {
       "one option": choice({ options: opts(1) }),
       "five options": choice({ options: opts(5) }),
-      "no option recommended": choice({ options: opts(3).map((o) => ({ ...o, recommended: false })) }),
+      "omitting recommended on every option": choice({ options: opts(3).map(({ recommended, ...o }) => o) }),
       "two recommended": choice({ options: opts(3).map((o, i) => ({ ...o, recommended: i < 2 })) }),
-      "header of 13 characters": choice({ header: "Cache storage" }),
       "blank header": choice({ header: "   " }),
-      "free text header of 13": freeText({ header: "Release names" }),
       "free text without a header": (({ header, ...rest }) => rest)(freeText()),
       "default is not the recommended label": choice({ default_answer: "Opt1" }),
       "duplicate labels": choice({ options: opts(3).map((o) => ({ ...o, label: "Same" })), default_answer: "Same" }),
@@ -273,7 +397,8 @@ describe("question tools, over real MCP", () => {
   it("update merges and revalidates the whole payload", { skip }, async () => {
     const id = (await asker.call("question_ask", choice({ question: "Merge validation probe wording" }))).question_id;
     await refusal(asker, "question_update", { question_id: id, default_answer: "Opt1" });
-    await refusal(asker, "question_update", { question_id: id, header: "thirteen char" });
+    const cut = await asker.call("question_update", { question_id: id, header: "thirteen char" });
+    assert.equal(cut.header_truncated, "thirteen");
     await refusal(asker, "question_update", { question_id: id, options: opts(1) });
     await asker.call("question_update", { question_id: id, header: "New header" });
     await asker.call("question_update", { question_id: id, options: opts(3, 2), default_answer: "Opt2" });

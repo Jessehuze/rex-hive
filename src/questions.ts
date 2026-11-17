@@ -66,6 +66,24 @@ function toRecord(row: Row): QuestionRecord {
 
 const blank = (s: unknown): boolean => typeof s !== "string" || s.trim() === "";
 
+function fitHeader(header: string): { header: string; truncated: boolean } {
+  const chars = [...header];
+  if (chars.length <= HEADER_MAX_CHARS) return { header, truncated: false };
+  const prefix = chars.slice(0, HEADER_MAX_CHARS);
+  if (/\s/u.test(chars[HEADER_MAX_CHARS])) {
+    return { header: prefix.join("").trimEnd(), truncated: true };
+  }
+  let boundary = -1;
+  for (let i = prefix.length - 1; i >= 0; i--) {
+    if (/\s/u.test(prefix[i])) {
+      boundary = i;
+      break;
+    }
+  }
+  const cut = (boundary > 0 ? prefix.slice(0, boundary) : prefix).join("").trimEnd();
+  return { header: cut, truncated: true };
+}
+
 function validateRef(ref: QuestionRef | undefined): void {
   if (ref === undefined) return;
   if (ref.kind !== "todo" && ref.kind !== "pr") throw new Error(`ref.kind must be "todo" or "pr", got ${JSON.stringify(ref.kind)}.`);
@@ -196,7 +214,9 @@ export function askQuestion(
   projectId: number,
   actor: string,
   input: QuestionInput,
-): { question_id: number; created: boolean; similar_question_ids: number[] } {
+): { question_id: number; created: boolean; similar_question_ids: number[]; header_truncated?: string } {
+  const fitted = fitHeader(input.header);
+  input = { ...input, header: fitted.header };
   validateInput(input);
   const refTaken = input.ref !== undefined && pendingIdForRef(projectId, input.ref) !== undefined;
   let askerChecked = false;
@@ -210,7 +230,12 @@ export function askQuestion(
     }
   }
   const { id, created } = upsertQuestion.immediate(projectId, actor, input, askerChecked);
-  return { question_id: id, created, similar_question_ids: similarPendingIds(projectId, id, input.question) };
+  return {
+    question_id: id,
+    created,
+    similar_question_ids: similarPendingIds(projectId, id, input.question),
+    ...(fitted.truncated ? { header_truncated: fitted.header } : {}),
+  };
 }
 
 function fetchRow(projectId: number, id: number): Row {
@@ -239,7 +264,7 @@ export function pendingQuestionCount(projectId: number): number {
 const TEXT_PATCH_KEYS = ["question", "header", "options", "default_answer"] as const;
 
 const patchQuestion = db.transaction(
-  (projectId: number, actor: string, id: number, patch: QuestionPatch): { question_id: number; state: QuestionState } => {
+  (projectId: number, actor: string, id: number, patch: QuestionPatch): { question_id: number; state: QuestionState; header_truncated?: string } => {
     const current = toRecord(fetchRow(projectId, id));
     const editsText = TEXT_PATCH_KEYS.some((k) => patch[k] !== undefined);
     if (editsText && current.state !== "pending") {
@@ -258,11 +283,12 @@ const patchQuestion = db.transaction(
       }
     }
     let merged: QuestionInput | null = null;
+    const fitted = patch.header === undefined ? null : fitHeader(patch.header);
     if (editsText) {
       if (current.kind === "free_text" && patch.options !== undefined) throw new Error("a free_text question takes no options.");
       const base = {
         question: patch.question ?? current.question,
-        header: patch.header ?? current.header,
+        header: fitted?.header ?? current.header,
         default_answer: patch.default_answer ?? current.default_answer,
         ...(current.ref ? { ref: current.ref } : {}),
       };
@@ -283,7 +309,11 @@ const patchQuestion = db.transaction(
       params.push(patch.state);
     }
     db.prepare(`UPDATE questions SET ${sets.join(", ")} WHERE id = ?`).run(...params, id);
-    return { question_id: id, state: patch.state ?? current.state };
+    return {
+      question_id: id,
+      state: patch.state ?? current.state,
+      ...(fitted?.truncated ? { header_truncated: fitted.header } : {}),
+    };
   },
 );
 
@@ -292,7 +322,7 @@ export function updateQuestion(
   actor: string,
   id: number,
   patch: QuestionPatch,
-): { question_id: number; state: QuestionState } {
+): { question_id: number; state: QuestionState; header_truncated?: string } {
   if (Object.keys(patch).filter((k) => (patch as Record<string, unknown>)[k] !== undefined).length === 0) {
     throw new Error("an empty patch changes nothing; pass at least one field to change.");
   }
@@ -307,6 +337,27 @@ export function answerWakeBody(id: number, question: string, answer: string, not
 type WakePlan =
   | { delivery: { actor: string; pane: string }; reroutedFrom?: string }
   | { skipped: string };
+
+type AnswerReceipt = {
+  question_id: number;
+  wake_id: number | null;
+  wake_skipped?: string;
+  wake_rerouted_to?: string;
+  already_answered?: boolean;
+};
+
+function repeatedAnswer(row: Row, answer: string, notes: string | null): AnswerReceipt {
+  if (row.state !== "answered") {
+    throw new Error(`${QUESTION_STATE_CONFLICT}: question ${row.id} is already ${row.state}.`);
+  }
+  if (row.answer?.trim() !== answer.trim()) {
+    throw new Error(`${QUESTION_STATE_CONFLICT}: question ${row.id} is already answered.`);
+  }
+  if (notes !== null && notes !== row.notes) {
+    throw new Error(`${QUESTION_STATE_CONFLICT}: the answer matches but the notes differ.`);
+  }
+  return { question_id: row.id, wake_id: null, already_answered: true };
+}
 
 function planAnswerWake(projectId: number, row: Row, actor: string): WakePlan {
   if (actor === row.asker) return { skipped: "answered by the asker" };
@@ -336,10 +387,10 @@ const commitAnswer = db.transaction(
     answer: string,
     notes: string | null,
     plan: WakePlan,
-  ): { question_id: number; wake_id: number | null; wake_skipped?: string; wake_rerouted_to?: string } => {
+  ): AnswerReceipt => {
     const row = fetchRow(projectId, id);
     if (row.state !== "pending" && row.state !== "defaulted") {
-      throw new Error(`${QUESTION_STATE_CONFLICT}: question ${id} is already ${row.state}.`);
+      return repeatedAnswer(row, answer, notes);
     }
     db.prepare(
       `UPDATE questions SET state = 'answered', answer = ?, notes = ?, answered_by = ?, updated_by = ?,
@@ -372,14 +423,14 @@ export function answerQuestion(
   id: number,
   answer: string,
   notes?: string,
-): { question_id: number; wake_id: number | null; wake_skipped?: string; wake_rerouted_to?: string } {
+): AnswerReceipt {
   if (blank(answer)) throw new Error("answer cannot be blank.");
   const storedNotes = notes === undefined || notes.trim() === "" ? null : notes;
   assertSafeWakeBody(answer);
   if (storedNotes !== null) assertSafeWakeBody(storedNotes);
   const row = fetchRow(projectId, id);
   if (row.state !== "pending" && row.state !== "defaulted") {
-    throw new Error(`${QUESTION_STATE_CONFLICT}: question ${id} is already ${row.state}.`);
+    return repeatedAnswer(row, answer, storedNotes);
   }
   const plan = planAnswerWake(projectId, row, actor);
   return commitAnswer.immediate(projectId, actor, id, answer, storedNotes, plan);

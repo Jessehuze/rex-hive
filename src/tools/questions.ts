@@ -15,8 +15,11 @@ import { idParam } from "./params.js";
 const optionParam = z.strictObject({
   label: z.string().describe("Short choice label; distinct within the question."),
   description: z.string().describe("What choosing this means."),
-  recommended: z.boolean().describe("Exactly one option is recommended; it is the default."),
+  recommended: z.boolean().optional().describe("Whether this option is recommended; omitted options default to false."),
 });
+
+const normalizeOptions = (options: { label: string; description: string; recommended?: boolean }[]) =>
+  options.map((option) => ({ ...option, recommended: option.recommended ?? false }));
 
 const refParam = z.strictObject({
   kind: z.enum(["todo", "pr"]),
@@ -33,12 +36,12 @@ export function registerQuestions(server: McpServer): void {
     "question_ask",
     {
       description:
-        "Record an open question for the human, keyed to this project and to you as the asker. kind=choice takes 2-4 options (each label, description, recommended; exactly one recommended) and a header of 12 characters or fewer; kind=free_text takes just the question and header. Every question carries default_answer: for a choice it is the recommended option's label. Pass ref (a todo id or PR number) to dedupe: asking again with a ref that already has a PENDING question in this project updates that row instead of adding one. The receipt lists other pending questions in this project that look similar (same normalized text, or at least half their longer words shared), so you can question_update one instead. The record is only stored: put the question to the human yourself, in your own turn. You must be a session an answer can be woken back to. When the question is answered, an ordinary wake carrying the answer is queued to you; read the record with question_get.",
+        "Record an open question for the human, keyed to this project and to you as the asker. kind=choice takes 2-4 options (each label, description, recommended; exactly one recommended) and a header of 12 characters or fewer (longer is cut at a word boundary and reported as header_truncated); kind=free_text takes just the question and header. Every question carries default_answer: for a choice it is the recommended option's label. Pass ref (a todo id or PR number) to dedupe: asking again with a ref that already has a PENDING question in this project updates that row instead of adding one. The receipt lists other pending questions in this project that look similar (same normalized text, or at least half their longer words shared), so you can question_update one instead. The record is only stored: put the question to the human yourself, in your own turn. You must be a session an answer can be woken back to. When the question is answered, an ordinary wake carrying the answer is queued to you; read the record with question_get.",
       annotations: writes,
       inputSchema: {
         kind: z.enum(["choice", "free_text"]),
         question: z.string(),
-        header: z.string().describe("12 characters or fewer."),
+        header: z.string().describe("12 characters or fewer; longer values are cut at a word boundary and reported as header_truncated."),
         options: z.array(optionParam).optional().describe("Required for choice, forbidden for free_text."),
         default_answer: z.string().describe("What you do if unanswered. For a choice, the recommended label."),
         ref: refParam.optional(),
@@ -47,6 +50,7 @@ export function registerQuestions(server: McpServer): void {
         question_id: idParam,
         created: z.boolean(),
         similar_question_ids: z.array(idParam),
+        header_truncated: z.string().optional(),
       },
     },
     (args) =>
@@ -57,7 +61,9 @@ export function registerQuestions(server: McpServer): void {
           question: args.question,
           header: args.header,
           default_answer: args.default_answer,
-          ...(args.options !== undefined ? { options: args.options } : {}),
+          ...(args.options !== undefined
+            ? { options: normalizeOptions(args.options) }
+            : {}),
           ...(args.ref !== undefined ? { ref: args.ref } : {}),
         } as QuestionInput;
         return askQuestion(projectId, currentActor(), input);
@@ -94,17 +100,21 @@ export function registerQuestions(server: McpServer): void {
       inputSchema: {
         question_id: idParam,
         question: z.string().optional(),
-        header: z.string().optional(),
+        header: z.string().describe("12 characters or fewer; longer values are cut at a word boundary and reported as header_truncated.").optional(),
         options: z.array(optionParam).optional(),
         default_answer: z.string().optional(),
         state: z.enum(["defaulted", "withdrawn"]).optional(),
       },
-      outputSchema: { question_id: idParam, state: stateParam },
+      outputSchema: { question_id: idParam, state: stateParam, header_truncated: z.string().optional() },
     },
     (args) =>
       run(() => {
-        const { question_id, ...patch } = args;
-        return updateQuestion(effectiveProjectId(), currentActor(), question_id, patch);
+        const { question_id, options, ...patch } = args;
+        const normalizedPatch = {
+          ...patch,
+          ...(options !== undefined ? { options: normalizeOptions(options) } : {}),
+        };
+        return updateQuestion(effectiveProjectId(), currentActor(), question_id, normalizedPatch);
       }),
   );
 
@@ -112,7 +122,7 @@ export function registerQuestions(server: McpServer): void {
     "question_answer",
     {
       description:
-        "Record the human's answer to a pending or defaulted question in this project, plus optional notes. The answer may be a picked option label or free text, including text outside the offered labels. The answer update comes first; the answer and any wake commit together, and the answer stays readable with `question_get`. An answered or withdrawn question refuses with `QUESTION_STATE_CONFLICT`. A queued wake carries the question, answer and notes verbatim. When you are the asker, skip with `wake_id: null` and `wake_skipped`; otherwise, queue a wake to the running asker or, if the asker has no running row, to the project's running lead with `wake_rerouted_to`. Skip that fallback with `wake_id: null` and `wake_skipped` if no lead runs or the lead is the answerer. `wake_id` means queued, not delivered.",
+        "Record the human's answer to a pending or defaulted question in this project, plus optional notes. The answer may be a picked option label or free text, including text outside the offered labels. The answer update comes first; the answer and any wake commit together, and the answer stays readable with `question_get`. Repeating the stored answer succeeds with already_answered: true when notes are absent or match the stored notes; a different answer or notes conflicts. A withdrawn question refuses with `QUESTION_STATE_CONFLICT`. A queued wake carries the question, answer and notes verbatim. When you are the asker, skip with `wake_id: null` and `wake_skipped`; otherwise, queue a wake to the running asker or, if the asker has no running row, to the project's running lead with `wake_rerouted_to`. Skip that fallback with `wake_id: null` and `wake_skipped` if no lead runs or the lead is the answerer. `wake_id` means queued, not delivered.",
       annotations: writes,
       inputSchema: {
         question_id: idParam,
@@ -124,6 +134,7 @@ export function registerQuestions(server: McpServer): void {
         wake_id: idParam.nullable(),
         wake_skipped: z.string().optional(),
         wake_rerouted_to: z.string().optional(),
+        already_answered: z.boolean().optional(),
       },
     },
     (args) =>
