@@ -59,6 +59,16 @@ function closedAgentNamed(
   ).find((r) => r.name.toLowerCase() === needle);
 }
 
+function runningAgentsHint(projectId: number): string {
+  const rows = db
+    .prepare("SELECT id, name FROM agents WHERE project_id = ? AND status = 'running' ORDER BY id")
+    .all(projectId) as { id: number; name: string }[];
+  if (rows.length === 0) return "No agents are running in this project.";
+  const listed = rows.slice(0, 10).map((row) => `${row.name} (agent_id ${row.id})`).join(", ");
+  const remaining = rows.length - 10;
+  return `Running agents: ${listed}${remaining > 0 ? `, and ${remaining} more` : ""}.`;
+}
+
 export function findAgent(projectId: number, ref: { agent_id?: number; name?: string }): AgentRow {
   if (ref.agent_id != null) {
     return getAgentRow(projectId, ref.agent_id, "Call agent_list.");
@@ -83,7 +93,7 @@ export function findAgent(projectId: number, ref: { agent_id?: number; name?: st
 
       if (closed.parked_at) {
         throw new Error(
-          `Agent ${closed.id} ("${closed.name}") is PARKED, not finished - it was paused on ` +
+          `Agent ${closed.id} ("${closed.name}") is PARKED, not finished - a parked agent is found by agent_id, not by name. It was paused on ` +
             `${closed.parked_at} and its session is waiting. Bring it back with agent_resume(agent_id: ` +
             `${closed.id}), or abandon the park with agent_close(agent_id: ${closed.id}).`,
         );
@@ -118,7 +128,9 @@ export function findAgent(projectId: number, ref: { agent_id?: number; name?: st
       if (byActorId) return byActorId;
     }
 
-    throw new Error(`No running agent matching "${ref.name}" in project ${projectId}. Call agent_list.`);
+    throw new Error(
+      `No running agent matching "${ref.name}" in project ${projectId}. ${runningAgentsHint(projectId)} Call agent_list.`,
+    );
   }
   throw new Error("Pass agent_id or name.");
 }

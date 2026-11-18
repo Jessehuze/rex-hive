@@ -120,6 +120,19 @@ after(async () => {
 });
 
 describe("question tools, over real MCP", () => {
+  it("a choice question without default_answer takes the recommended label", { skip }, async () => {
+    const input = choice({ question: "Which no-default option is recommended?" });
+    delete input.default_answer;
+    const made = await asker.call("question_ask", input);
+    assert.equal((await asker.call("question_get", { question_id: made.question_id })).default_answer, "Opt0");
+  });
+
+  it("a free_text question without default_answer is refused", { skip }, async () => {
+    const input = freeText({ question: "Which default must free text provide?" });
+    delete input.default_answer;
+    assert.match(await refusal(asker, "question_ask", input), /a free_text question needs default_answer\./);
+  });
+
   it("question_ask cuts an over-long header at a word boundary and reports it", { skip }, async () => {
     const made = await asker.call("question_ask", freeText({ header: "Scheduling dep" }));
     assert.equal(made.header_truncated, "Scheduling");
@@ -139,6 +152,12 @@ describe("question tools, over real MCP", () => {
   it("question_ask hard-cuts a header whose first word is over 12", { skip }, async () => {
     const made = await asker.call("question_ask", freeText({ header: "abcdefghijklmnop rest" }));
     assert.equal(made.header_truncated, "abcdefghijkl");
+  });
+
+  it("a header with a leading space and a long first word hard-cuts instead of emptying", { skip }, async () => {
+    const made = await asker.call("question_ask", freeText({ header: " Supercalifragilistic" }));
+    assert.equal(made.header_truncated, " Supercalifr");
+    assert.equal((await asker.call("question_get", { question_id: made.question_id })).header, " Supercalifr");
   });
 
   it("question_ask counts header limits in code points", { skip }, async () => {
@@ -187,6 +206,12 @@ describe("question tools, over real MCP", () => {
   it("omitting recommended on every option is still refused", { skip }, async () => {
     const options = opts(2).map(({ recommended, ...option }) => option);
     assert.match(await refusal(asker, "question_ask", choice({ options })), /exactly one option must be recommended, got 0/);
+  });
+
+  it("a differing choice default explains that it can be omitted", { skip }, async () => {
+    const error = await refusal(asker, "question_ask", choice({ default_answer: "Opt1" }));
+    assert.match(error, /default_answer must be the recommended option's label/);
+    assert.match(error, /or omit default_answer to use it/);
   });
 
   it("two recommended options are still refused", { skip }, async () => {
@@ -408,6 +433,13 @@ describe("question tools, over real MCP", () => {
     assert.equal(got.options.length, 3);
     const ft = (await asker.call("question_ask", freeText({ question: "Free text options probe wording" }))).question_id;
     await refusal(asker, "question_update", { question_id: ft, options: opts() });
+  });
+
+  it("question_update moving recommended without default_answer follows it", { skip }, async () => {
+    const id = (await asker.call("question_ask", choice({ question: "Move the recommended choice?" }))).question_id;
+    await asker.call("question_update", { question_id: id, options: opts(3, 2) });
+    const got = await asker.call("question_get", { question_id: id });
+    assert.equal(got.default_answer, "Opt2");
   });
 
   it("question tools reject unknown nested and root keys", { skip }, async () => {
