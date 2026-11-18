@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.15.1 - 2026-11-17
+
+- `agent_park` no longer ends a live worker closed instead of parked. Another hive session's cleanup could close the worker between the park killing its pane and recording the park, which left the worker with no parked branch. The park now holds the store's write lock across both steps.
+- `question_ask` and `question_update` accept a header over 12 characters. They cut it at a word boundary and report the stored value as `header_truncated`.
+- A choice question can leave `recommended` off the options that are not recommended; it counts as false. Exactly one option must still be recommended.
+- A choice question can omit `default_answer`; it takes the recommended option's label. A given value that differs is still refused. A free-text question still needs one.
+- `question_answer` and `hive answer` accept a repeat of the stored answer and return `already_answered: true` instead of an error. A different answer, different notes, or a withdrawn question still refuses.
+- `todo_create` and `todo_update` accept a slug over 40 characters. They cut it at a word boundary and report the stored value as `slug_truncated`.
+- When `pad_edit` cannot find `old_text`, the error names the pad's current revision. If the text matches once when whitespace is ignored, it also names the line where it starts. The edit is not applied.
+- When no running agent matches a name, the error lists the running agents. A parked agent's refusal says to address it by `agent_id`.
+- Updated `better-sqlite3` to 13.2.0.
+- After upgrading, restart every hive session and the lead.
+
 ## 1.15.0 - 2026-11-17
 
 - A worker's leases are now released when hive closes it, parks it, or finds its pane gone. Before, a lease held by a closed worker blocked everyone until its TTL ran out. `agent_close` and `agent_park` list the released keys in `released_leases`. `agent_close(row_only: true)` keeps the leases, because it does not stop the pane. A lead's leases and other actors' leases are untouched. This is on by default.
