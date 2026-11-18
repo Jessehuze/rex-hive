@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.15.2 - 2026-11-17
+
+- A lead handoff no longer stalls while the lead is watching an artifact it asked to watch. Before, only artifact watches started by publishing let the handoff through; a watch started on request counted as live background work, so every attempt was refused and the lead was asked again about every 13 minutes. Any artifact live-update watch now lets the handoff through, and the new session is asked to re-watch it. Other live background work still blocks the handoff.
+- After upgrading, restart every hive session and the lead.
+
 ## 1.15.1 - 2026-11-17
 
 - `agent_park` no longer ends a live worker closed instead of parked. Another hive session's cleanup could close the worker between the park killing its pane and recording the park, which left the worker with no parked branch. The park now holds the store's write lock across both steps.
