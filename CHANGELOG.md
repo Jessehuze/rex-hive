@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.15.3 - 2026-11-19
+
+- Workers no longer inherit npm's settings when hive runs through `npx`. When an npx-launched hive server started the tmux server, every worker pane received about 20 `npm_*` variables from npm exec, including `npm_config_force`, `npm_config_yes`, `npm_config_package` and any `npm_config_min_release_age` set for the server. A worker's own `npm` and `npx` then ran with the server's settings, ignored a repository's `.npmrc` release-age rule, and could fail to find the tool it asked for. hive now leaves `npm_*`, `INIT_CWD` and `NODE` out of the environment it hands tmux when it runs under npm exec. A tmux server started from your terminal or by `hive lead` was never affected.
+- The install guide explains why the managed `npx` entry fails with `EBADDEVENGINES` in a repository whose `package.json` names pnpm (or another manager) under `devEngines.packageManager`, and how to fix it: set `npm_config_force=true` in the server's environment.
+- For contributors: `npm test` now stops at once with an `npm install` instruction when the checkout's own `node_modules` is missing or incomplete, instead of half-running against a parent folder's packages.
+- After upgrading, restart every hive session and the lead.
+
 ## 1.15.2 - 2026-11-17
 
 - A lead handoff no longer stalls while the lead is watching an artifact it asked to watch. Before, only artifact watches started by publishing let the handoff through; a watch started on request counted as live background work, so every attempt was refused and the lead was asked again about every 13 minutes. Any artifact live-update watch now lets the handoff through, and the new session is asked to re-watch it. Other live background work still blocks the handoff.
