@@ -1,13 +1,19 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { after, describe, it } from "node:test";
 import { dirname, join } from "node:path";
 
-import { clearHiveEnv, isolateTmux, McpClient, scratchDirs, tmux, until } from "./helpers.mjs";
+import {
+  clearHiveEnv, isolateTmux, McpClient, recordScratchTmuxSocket, scratchDirs, tmux, tmuxSocketUnder, until,
+} from "./helpers.mjs";
 
 const { hasTmux, cleanup } = isolateTmux("the worker PATH tests");
 const dirs = scratchDirs();
+const npmTmuxTmp = mkdtempSync(join(tmpdir(), "hive-npm-tmux-"));
+const npmTmuxSocket = tmuxSocketUnder(npmTmuxTmp);
+recordScratchTmuxSocket(npmTmuxSocket);
 clearHiveEnv();
 process.env.HIVE_DATA_DIR = dirs.dataDir;
 const { paneEnvPath, sessionName } = await import("../dist/tmux.js");
@@ -15,8 +21,10 @@ const { db } = await import("../dist/db.js");
 
 const userBin = join(dirs.tmp, "existing", "node_modules", ".bin");
 const fakeBin = join(dirs.tmp, "fake-bin");
+const probeNode = join(dirs.tmp, "node");
 mkdirSync(userBin, { recursive: true });
 mkdirSync(fakeBin, { recursive: true });
+symlinkSync(process.execPath, probeNode);
 const nodeBin = dirname(process.execPath);
 const tmuxBin = hasTmux ? dirname(execFileSync("which", ["tmux"], { encoding: "utf8" }).trim()) : "/usr/bin";
 const basePath = [userBin, fakeBin, nodeBin, tmuxBin, "/usr/bin", "/bin"].join(":");
@@ -36,7 +44,7 @@ function pathProbeCommand(output) {
   return `/usr/bin/printenv PATH > ${quote(temporary)} && /bin/mv ${quote(temporary)} ${quote(output)}`;
 }
 
-function startMcp(serverPath, npmCommand, shell = "/bin/sh") {
+function startMcp(serverPath, npmCommand, shell = "/bin/sh", extraEnv = {}) {
   return new McpClient({
     cwd: dirs.projectDir,
     dataDir: dirs.dataDir,
@@ -45,6 +53,7 @@ function startMcp(serverPath, npmCommand, shell = "/bin/sh") {
       HOME: dirs.tmp,
       npm_command: npmCommand,
       npm_lifecycle_event: "test",
+      ...extraEnv,
       HIVE_SPAWN_READY_MS: "1",
       TERM: "xterm-256color",
       SHELL: shell,
@@ -52,15 +61,24 @@ function startMcp(serverPath, npmCommand, shell = "/bin/sh") {
   });
 }
 
-async function withMcp(serverPath, npmCommand, action, shell = "/bin/sh") {
+async function withMcp(serverPath, npmCommand, action, shell = "/bin/sh", extraEnv = {}) {
   cleanup(sessionName());
-  const mcp = startMcp(serverPath, npmCommand, shell);
+  const mcp = startMcp(serverPath, npmCommand, shell, extraEnv);
   try {
     await mcp.start();
     return await action(mcp);
   } finally {
     await mcp.close();
-    cleanup(sessionName());
+    const previousTmuxTmpDir = process.env.TMUX_TMPDIR;
+    if (extraEnv.TMUX_TMPDIR) process.env.TMUX_TMPDIR = extraEnv.TMUX_TMPDIR;
+    try {
+      cleanup(sessionName());
+    } finally {
+      if (extraEnv.TMUX_TMPDIR) {
+        if (previousTmuxTmpDir === undefined) delete process.env.TMUX_TMPDIR;
+        else process.env.TMUX_TMPDIR = previousTmuxTmpDir;
+      }
+    }
   }
 }
 
@@ -74,6 +92,23 @@ async function spawnPathProbe(mcp, name, output, placement = "window") {
   });
   await until(() => existsSync(output), 5000, 25, `the ${name} pane writes its PATH`);
   return readFileSync(output, "utf8").trim();
+}
+
+async function spawnEnvProbe(mcp, name, output, placement = "window") {
+  const script = join(dirs.tmp, `${name}.mjs`);
+  writeFileSync(script, [
+    'import { writeFileSync } from "node:fs";',
+    'writeFileSync(process.argv[2], Object.entries(process.env).map(([key, value]) => key + "=" + value).join("\\n"));',
+    "setTimeout(() => {}, 600000);",
+  ].join("\n"));
+  await mcp.call("agent_spawn", {
+    name,
+    command: probeNode,
+    extra_args: [script, output],
+    placement,
+  });
+  await until(() => existsSync(output), 5000, 25, `the ${name} pane writes its environment`);
+  return readFileSync(output, "utf8").trim().split("\n");
 }
 
 function installFakeClaude(output) {
@@ -98,6 +133,37 @@ after(() => {
 });
 
 describe("worker pane PATH from npm exec", () => {
+  it("removes npm exec variables from new, split, and window panes", needsTmux, async () => {
+    const npmEnv = {
+      npm_config_force: "true",
+      npm_config_min_release_age: "0",
+      npm_config_yes: "true",
+      npm_config_package: "node@24.22.1",
+      npm_package_name: "fixture",
+      npm_execpath: "/tmp/npm/bin/npm-cli.js",
+      npm_node_execpath: "/tmp/node",
+      _: "/tmp/.npm/_npx/hash/node_modules/.bin/hive-mcp",
+      INIT_CWD: dirs.projectDir,
+      NODE: "/tmp/node/bin/node",
+    };
+    await withMcp(npmExecPath, "exec", async (mcp) => {
+      for (const [name, placement] of [["npm-env-first", "window"], ["npm-env-split", "split"], ["npm-env-window", "window"]]) {
+        const lines = await spawnEnvProbe(mcp, name, join(dirs.tmp, `${name}.env`), placement);
+        assert.deepEqual(lines.filter((line) => /^(npm_|npm_command=|npm_lifecycle_|npm_package_|INIT_CWD=|NODE=)/i.test(line)), []);
+        assert.equal(lines.includes(`_=${npmEnv._}`), false);
+      }
+    }, "/bin/sh", { ...npmEnv, TMUX_TMPDIR: npmTmuxTmp });
+  });
+
+  it("preserves user npm variables when the server is not running under npm exec", needsTmux, async () => {
+    const userNpmEnv = { npm_config_force: "false", npm_config_min_release_age: "7" };
+    await withMcp(basePath, "run-script", async (mcp) => {
+      const lines = await spawnEnvProbe(mcp, "npm-env-user", join(dirs.tmp, "npm-env-user.env"));
+      assert.ok(lines.includes("npm_config_force=false"));
+      assert.ok(lines.includes("npm_config_min_release_age=7"));
+    }, "/bin/sh", { ...userNpmEnv, TMUX_TMPDIR: npmTmuxTmp });
+  });
+
   it("cuts the npm exec PATH prefix from a split worker using the server's explicit environment", needsTmux, async () => {
     assert.notEqual(npmExecPath, process.env.PATH, "the PATH fixture must differ from the test runner's PATH");
     await withMcp(npmExecPath, "exec", async (mcp) => {
