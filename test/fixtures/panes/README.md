@@ -111,6 +111,24 @@ more than a same-width rename.
   continuation content, stopping at the box's own closing border or a
   genuinely blank row.
 
+## IDE chip fixtures (todo 2764)
+
+The nine real `ide-chip-*.txt` fixtures below are 120x40 `tmux capture-pane -p -e` screens from Claude Code 2.1.330 in a private scratch tmux server, with TERM=tmux-256color. The fake IDE used a scratch Claude config lockfile and a local WebSocket MCP handshake, then sent `selection_changed`; it was not VS Code. The capture paths name the fake scratch cwd, so `/private/tmp/x.pQ3a/work` was replaced with the same-width `/private/tmp/x.XXXX/work`. The captured model/plan banner is padded neutral text (`Model · Plan`), and the promo shown in four captures is a neutral help tip. These equal-byte scrubs preserve every row width and all SGR sequences.
+
+- `ide-chip-empty-faint.txt` is `tc-01-chip-infile-empty.txt`, with `[⧉ In Untitled-1] ` followed by the faint `Try` placeholder.
+- `ide-chip-empty-inverse.txt` is `01-chip-infile-empty.txt`, with the inverse-cursor `Try` placeholder after the chip.
+- `ide-chip-typed-faint.txt` is `tc-02-chip-infile-typed.txt`, with real unsubmitted `hello` after the chip.
+- `ide-chip-typed-inverse.txt` is `02-chip-infile-typed.txt`, with real unsubmitted `hello` after the chip and an inverse cursor at the end.
+- `ide-chip-selection-empty.txt` is `tc-05-chip-12-lines-selected-empty.txt`, with a selection chip and the faint placeholder.
+- `ide-chip-selection-typed.txt` is `tc-06-chip-12-lines-selected-typed.txt`, with a selection chip and real unsubmitted `explain this`.
+- `ide-chip-long-name.txt` is `09-chip-long-name-truncated.txt`, with the middle-truncated file chip and inverse-cursor placeholder.
+- `ide-chip-bracket-in-name.txt` is `10-chip-bracket-in-name.txt`, with `]` rewritten to `)` inside the filename chip and inverse-cursor placeholder.
+- `ide-chip-no-chip-inverse.txt` is `00-nochip-empty.txt`, the no-chip inverse-cursor placeholder control from the same session.
+- `ide-chip-lookalike-pending.txt` is SYNTHETIC: it keeps the captured input-box borders and SGR prompt prefix, but uses `[notes] REAL UNSUBMITTED INPUT` as ordinary prompt text to pin that a bracket alone is not an IDE chip.
+- `ide-chip-literal-typed-pending.txt` is SYNTHETIC: it reuses the captured top and bottom borders from `ide-chip-typed-faint.txt`, then replaces its colored pill with a default-foreground prompt containing the literal human text `[⧉ In Untitled-1]`. The prompt uses `ESC[39m` before `❯` and has no foreground-color SGR after the prompt glyph, so replaying it checks that text alone cannot trigger the pill strip.
+
+The fake IDE's handshake and the exact captured SGR sequences are recorded in todo 2764, comment 20076. This corpus does not cover diff-source chips, light or ansi themes, an attached tmux client, or VS Code's `TERM_PROGRAM=vscode` process-ancestor check.
+
 ## Todo 392: the ordinary tool-permission prompt
 
 Three genuine captures off a real claude 2.1.231 session, 2026-08-13, for the
