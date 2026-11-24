@@ -8,6 +8,33 @@ function isBuiltSchema(value: unknown): boolean {
   return typeof value === "object" && value !== null && ("_zod" in value || "_def" in value);
 }
 
+const UNKNOWN_KEY_ALIASES = new Map<string, string[]>([
+  ["message", ["text"]],
+  ["agent", ["name"]],
+  ["body", ["content"]],
+]);
+
+export function unknownKeyHint(keys: string[], shapeKeys: string[], suppliedKeys: string[] = []): string | undefined {
+  const supplied = new Set(suppliedKeys);
+  const hints = keys.flatMap((key) => {
+    const matches = shapeKeys.filter(
+      (candidate) =>
+        candidate !== "project_id" &&
+        !supplied.has(candidate) &&
+        (candidate.endsWith(`_${key}`) || candidate === `${key}s` || UNKNOWN_KEY_ALIASES.get(key)?.includes(candidate)),
+    );
+    if (matches.length === 0) return [];
+    const hint = `did you mean ${matches.map((match) => `\"${match}\"`).join(" or ")}?`;
+    return keys.length === 1 ? [hint] : [`${JSON.stringify(key)}: ${hint}`];
+  });
+  if (hints.length === 0) return undefined;
+  const refusal =
+    keys.length === 1
+      ? `Unrecognized key: ${JSON.stringify(keys[0])}`
+      : `Unrecognized keys: ${keys.map((key) => JSON.stringify(key)).join(", ")}`;
+  return `${refusal}; ${hints.join("; ")}`;
+}
+
 function strictSchemaFor(toolName: string, inputSchema: unknown): unknown {
   if (inputSchema === undefined) return undefined;
   if (isBuiltSchema(inputSchema)) {
@@ -17,7 +44,14 @@ function strictSchemaFor(toolName: string, inputSchema: unknown): unknown {
         "make your schema strict yourself and widen this check deliberately.",
     );
   }
-  return z.strictObject(inputSchema as z.ZodRawShape);
+  const shape = inputSchema as z.ZodRawShape;
+  return z.strictObject(shape, {
+    error: (issue) => {
+      if (issue.code !== "unrecognized_keys") return undefined;
+      const suppliedKeys = typeof issue.input === "object" && issue.input !== null ? Object.keys(issue.input) : [];
+      return unknownKeyHint(issue.keys, Object.keys(shape), suppliedKeys);
+    },
+  });
 }
 
 type ToolCallback = (...args: unknown[]) => unknown;
