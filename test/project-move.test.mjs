@@ -111,6 +111,7 @@ describe("hive project mv", () => {
     const preview = cli(old, [next], previewEnv);
     const output = assertOk(preview);
     assert.match(output, /Preview only/);
+    assert.match(output, /Refusals: none found during preflight\./);
     assert.match(output, /exit Claude Code and Codex/);
     assert.match(output, /codex resume --all/);
     assert.ok(existsSync(old));
@@ -215,13 +216,47 @@ describe("hive project mv", () => {
     assert.match(result.stdout, /exact checkout path/);
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM projects").get().n, projectsBeforeMissing);
 
-    agent(id, { cwd: old, status: "running", kind: "lead" });
+    const runningAgent = agent(id, { cwd: old, status: "running", kind: "lead" });
     result = cli(old, [next, "--apply"]);
     assert.notEqual(result.status, 0);
-    assert.match(result.stdout, /running hive agents/);
+    assert.match(result.stdout, /has running hive agents: fixture \(lead, \d+\); close every agent before applying a move\./);
     assert.ok(existsSync(old));
     assert.equal(existsSync(next), false);
     assert.equal(db.prepare("SELECT path FROM projects WHERE id = ?").get(id).path, realpathSync(old));
+
+    db.prepare("UPDATE agents SET status = 'closed' WHERE id = ?").run(runningAgent);
+    result = cli(old, [next, "--apply"]);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.equal(existsSync(old), false);
+    assert.ok(existsSync(next));
+    assert.equal(db.prepare("SELECT path FROM projects WHERE id = ?").get(id).path, realpathSync(next));
+  });
+
+  it("project mv preview with a running agent prints the plan and names the agent", () => {
+    const old = join(root, "running-preview-old");
+    const next = join(root, "running-preview-new");
+    const id = project("running preview", old);
+    const runningId = agent(id, { cwd: old, status: "running", kind: "lead" });
+
+    const result = cli(old, [next]);
+
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /Project .*: running preview/);
+    assert.match(result.stdout, /Checkout: .* -> .*/);
+    assert.match(result.stdout, /Git:/);
+    assert.match(result.stdout, /Claude storage:/);
+    assert.match(result.stdout, /Config files(?: to update)?:/);
+    assert.match(result.stdout, /Claude config:/);
+    assert.match(result.stdout, new RegExp(`fixture \\(lead, ${runningId}\\)`));
+    assert.match(result.stdout, /--apply refuses until every agent is closed/);
+    assert.match(result.stdout, /Codex guidance:/);
+    assert.match(result.stdout, /Precondition:/);
+    assert.match(result.stdout, /Recovery command:/);
+    assert.doesNotMatch(result.stdout, /Refusals: none found during preflight\./);
+    assert.ok(existsSync(old));
+    assert.equal(existsSync(next), false);
+    assert.equal(db.prepare("SELECT path FROM projects WHERE id = ?").get(id).path, realpathSync(old));
+    assert.equal(db.prepare("SELECT status FROM agents WHERE id = ?").get(runningId).status, "running");
   });
 
   it("project mv refuses all collisions and ambiguous layouts", () => {
