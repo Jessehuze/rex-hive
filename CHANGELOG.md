@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.15.4 - 2026-11-23
+
+- Claude workers no longer connect to your editor. A tmux server started from an editor's integrated terminal (for example VS Code) passed that terminal's `CLAUDE_CODE_SSE_PORT` and `VSCODE_*` variables to every worker, so each worker connected to the editor extension and showed the active file or selection as a chip in its prompt box. hive read that chip as unsent text and refused to type into the worker. hive now sets `CLAUDE_CODE_AUTO_CONNECT_IDE=false` in every Claude worker pane at spawn, fork and resume. A lead keeps its editor connection. This is on by default.
+- A Claude lead that shows an editor chip (`[⧉ In <file>]` or `[⧉ N lines selected]`) in an otherwise empty prompt box no longer reads as holding unsent text, so messages and wakes that fall back to typing into the pane are no longer held. hive treats the chip as part of the prompt only when it carries the chip's own colour; text you type that looks like a chip still counts as unsent input.
+- The docs cover `hive project mv`, the tool input changes from 1.15.1, lease release on close and park, the worker editor setting, and several smaller corrections. The pad export note in the security page now says the file always goes to the system temp folder.
+- For contributors: a test that waited forever for a trust prompt under heavy machine load now fails by name after 30 seconds and shows the screen it saw.
+- After upgrading, restart every hive session and the lead.
+
 ## 1.15.3 - 2026-11-19
 
 - Workers no longer inherit npm's settings when hive runs through `npx`. When an npx-launched hive server started the tmux server, every worker pane received about 20 `npm_*` variables from npm exec, including `npm_config_force`, `npm_config_yes`, `npm_config_package` and any `npm_config_min_release_age` set for the server. A worker's own `npm` and `npx` then ran with the server's settings, ignored a repository's `.npmrc` release-age rule, and could fail to find the tool it asked for. hive now leaves `npm_*`, `INIT_CWD` and `NODE` out of the environment it hands tmux when it runs under npm exec. A tmux server started from your terminal or by `hive lead` was never affected.
