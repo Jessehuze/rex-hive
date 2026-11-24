@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { after, before, it } from "node:test";
 import { parse as parseToml } from "smol-toml";
 import { isolateTmux, liveAgentRow, McpClient, scratchDirs, scratchGit, until } from "./helpers.mjs";
@@ -11,6 +13,7 @@ process.env.HIVE_DATA_DIR = dirs.dataDir;
 const { db } = await import("../dist/db.js");
 const { sessionName } = await import("../dist/tmux.js");
 const { codexLaunchArgs } = await import("../dist/codexHome.js");
+const { ensureWorkerHooksFile, readOnlyDenyWrite, readOnlyTmpDir } = await import("../dist/hooks.js");
 scratchGit(dirs.projectDir, "init", "-q");
 scratchGit(dirs.projectDir, "commit", "-q", "--allow-empty", "-m", "root");
 writeFileSync(join(dirs.projectDir, "hive.yml"), "agents: [claude, codex]\n");
@@ -49,6 +52,10 @@ for (const harness of ["claude", "codex"]) {
     let args = await argv();
     await liveAgentRow(mcp, `sealed-${harness}`);
     assert.equal((await mcp.call("agent_status", { agent_id: receipt.agent_id })).read_only, true);
+    if (harness === "claude") {
+      chmodSync(readOnlyTmpDir(receipt.agent_id), 0o755);
+      ensureWorkerHooksFile(receipt.agent_id, { includePostToolUse: false, readOnly: true });
+    }
     const check = () => {
       if (harness === "codex") {
         assert.equal(args[args.indexOf("--sandbox") + 1], "read-only");
@@ -59,18 +66,31 @@ for (const harness of ["claude", "codex"]) {
       } else {
         const settings = JSON.parse(readFileSync(args[args.indexOf("--settings") + 1], "utf8"));
         assert.deepEqual(settings.permissions.deny, ["SendMessage", "ListAgents", "Edit", "Write", "NotebookEdit"]);
-        assert.deepEqual(settings.sandbox, { enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false, filesystem: { denyWrite: ["//"] } });
+        assert.deepEqual(settings.sandbox, {
+          enabled: true,
+          failIfUnavailable: true,
+          autoAllowBashIfSandboxed: true,
+          allowUnsandboxedCommands: false,
+          filesystem: { denyWrite: [`/${realpathSync(dirs.projectDir)}`, `/${realpathSync(join(dirs.projectDir, ".git"))}`] },
+        });
+        assert.equal(settings.env.CLAUDE_CODE_TMPDIR, readOnlyTmpDir(receipt.agent_id));
+        const storeHash = createHash("sha256").update(realpathSync(dirs.dataDir)).digest("hex").slice(0, 8);
+        assert.equal(settings.env.CLAUDE_CODE_TMPDIR, `/tmp/hive-${process.getuid()}/${storeHash}-w${receipt.agent_id}`);
+        assert.equal(settings.env.CLAUDE_CODE_TMPDIR.startsWith(homedir()), false);
+        assert.equal(statSync(settings.env.CLAUDE_CODE_TMPDIR).mode & 0o777, 0o700);
       }
     };
     check();
     if (harness === "codex") db.prepare("UPDATE agents SET session_id = ? WHERE id = ?").run("sealed-session", receipt.agent_id);
     await mcp.call("agent_park", { agent_id: receipt.agent_id });
+    if (harness === "claude") rmSync(readOnlyTmpDir(receipt.agent_id), { recursive: true, force: true });
     rmSync(argvFile, { force: true });
     await mcp.call("agent_resume", { agent_id: receipt.agent_id });
     args = await argv();
     check();
     assert.equal((await mcp.call("agent_status", { agent_id: receipt.agent_id })).read_only, true);
     await mcp.call("agent_close", { agent_id: receipt.agent_id });
+    if (harness === "claude") assert.equal(existsSync(readOnlyTmpDir(receipt.agent_id)), false);
   });
 
   it(`${harness} read-only planning seat accepts effort arguments and preserves them on resume`, gate, async () => {
@@ -89,7 +109,11 @@ for (const harness of ["claude", "codex"]) {
         assert.equal(args.includes("--add-dir"), false);
       } else {
         const settings = JSON.parse(readFileSync(args[args.indexOf("--settings") + 1], "utf8"));
-        assert.deepEqual(settings.sandbox.filesystem.denyWrite, ["//"]);
+        assert.deepEqual(settings.sandbox.filesystem.denyWrite, [
+          `/${realpathSync(dirs.projectDir)}`,
+          `/${realpathSync(join(dirs.projectDir, ".git"))}`,
+        ]);
+        assert.equal(settings.env.CLAUDE_CODE_TMPDIR, readOnlyTmpDir(receipt.agent_id));
         assert.equal(settings.sandbox.allowUnsandboxedCommands, false);
       }
     };
@@ -103,6 +127,7 @@ for (const harness of ["claude", "codex"]) {
     check();
     assert.equal((await mcp.call("agent_status", { agent_id: receipt.agent_id })).read_only, true);
     await mcp.call("agent_close", { agent_id: receipt.agent_id });
+    if (harness === "claude") assert.equal(existsSync(readOnlyTmpDir(receipt.agent_id)), false);
   });
 
   it(`${harness} ordinary spawn keeps the existing argv and config permissions`, gate, async () => {
@@ -119,7 +144,9 @@ for (const harness of ["claude", "codex"]) {
       assert.deepEqual(args, ["--model", "test-model", "--name", "ordinary-claude", "--settings", join(dirs.dataDir, `worker-${receipt.agent_id}-hooks.json`), "--append-system-prompt-file", join(dirs.dataDir, "briefs", `agent-${receipt.agent_id}.md`), "--session-id", row.session_id, "--example"]);
       const settings = JSON.parse(readFileSync(args[args.indexOf("--settings") + 1], "utf8"));
       assert.equal(settings.sandbox, undefined);
+      assert.equal(settings.env, undefined);
       assert.deepEqual(settings.permissions.deny, ["SendMessage", "ListAgents"]);
+      assert.equal(existsSync(readOnlyTmpDir(receipt.agent_id)), false);
     }
     await mcp.call("agent_close", { agent_id: receipt.agent_id });
   });
@@ -153,4 +180,32 @@ it("read-only codex launch omits additional writable roots that the TUI refuses"
   assert.equal(args.includes("--add-dir"), false);
   assert.equal(args[args.indexOf("--sandbox") + 1], "read-only");
   assert.ok(codexLaunchArgs(dirs.projectDir).includes("--add-dir"));
+});
+
+it("a read-only worker outside git denies only its real cwd", () => {
+  assert.deepEqual(readOnlyDenyWrite(dirs.tmp), [`/${realpathSync(dirs.tmp)}`]);
+});
+
+it("read-only temp paths differ between stores for the same agent id", () => {
+  const secondStore = join(dirs.tmp, "second-store");
+  mkdirSync(secondStore);
+  assert.notEqual(readOnlyTmpDir(42, dirs.dataDir), readOnlyTmpDir(42, secondStore));
+});
+
+it("agent_close removes a parked read-only Claude worker's private temp directory", gate, async () => {
+  rmSync(argvFile, { force: true });
+  const receipt = await mcp.call("agent_spawn", { name: "parked-sealed-claude", command: join(bin, "claude"), read_only: true });
+  const args = await argv();
+  await liveAgentRow(mcp, "parked-sealed-claude");
+  const settings = JSON.parse(readFileSync(args[args.indexOf("--settings") + 1], "utf8"));
+  const privateTmpDir = settings.env.CLAUDE_CODE_TMPDIR;
+  assert.equal(existsSync(privateTmpDir), true);
+  await mcp.call("agent_park", { agent_id: receipt.agent_id });
+  assert.equal(existsSync(privateTmpDir), true);
+  try {
+    assert.equal((await mcp.call("agent_close", { agent_id: receipt.agent_id })).closed, true);
+    assert.equal(existsSync(privateTmpDir), false);
+  } finally {
+    rmSync(privateTmpDir, { recursive: true, force: true });
+  }
 });
