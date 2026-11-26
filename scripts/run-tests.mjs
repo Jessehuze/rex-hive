@@ -104,6 +104,7 @@ if (!singleFileTarget && noLockRequested()) {
 if (!lockBlocked) {
   const manifestDir = mkdtempSync(join(tmpdir(), "hive-leakcheck-"));
   const manifest = join(manifestDir, "sockets");
+  const rexManifest = join(manifestDir, "rex-states");
 
   const fakeOpen = installFakeOpen();
 
@@ -125,6 +126,7 @@ if (!lockBlocked) {
       ...process.env,
       PATH: `${fakeOpen.bin}${delimiter}${process.env.PATH}`,
       HIVE_TMUX_LEAK_MANIFEST: manifest,
+      HIVE_REX_RELAY_MANIFEST: rexManifest,
     },
   });
 
@@ -161,6 +163,19 @@ if (!lockBlocked) {
     console.log(`\n${openEscaped ? "open-call check FAILED" : "open-call check"}: ${openLines[0]}`);
     for (const line of openLines.slice(1)) console.log(line);
 
+    let relayLeaked = false;
+    let relayLines;
+    try {
+      const { checkRelayLeaks, describeRelayLeaks } = await import("./rex-relay-leaks.mjs");
+      const relays = checkRelayLeaks(rexManifest);
+      relayLeaked = relays.leaked.length > 0;
+      relayLines = describeRelayLeaks(relays);
+    } catch (e) {
+      relayLines = [`unavailable: ${e?.message ?? e}`];
+    }
+    console.log(`\n${relayLeaked ? "fake rex relay check FAILED" : "fake rex relay check"}: ${relayLines[0]}`);
+    for (const line of relayLines.slice(1)) console.log(line);
+
     rmSync(manifestDir, { recursive: true, force: true });
     fakeOpen.reap();
 
@@ -188,7 +203,7 @@ if (!lockBlocked) {
 
     suiteLock?.release();
 
-    process.exitCode = suiteFailed ? (code ?? 1) : leaked ? 1 : openEscaped ? 1 : 0;
+    process.exitCode = suiteFailed ? (code ?? 1) : leaked || relayLeaked ? 1 : openEscaped ? 1 : 0;
 
     if (doomed.length > 0) {
       try {

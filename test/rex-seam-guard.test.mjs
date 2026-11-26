@@ -85,7 +85,7 @@ function tmuxImportViolations(rel, text) {
   return found;
 }
 
-const EXEC_CALL = /(?<!\bcheck)\("tmux"|\btmux\(|\("rex"/;
+const EXEC_CALL = /(?<!\bcheck)\(\s*["'`]tmux["'`]|\btmux\(|\(\s*["'`]rex["'`]/;
 
 function execViolations(rel, text) {
   if (EXEC_ALLOWLIST.includes(rel) || EXEC_ALLOWED_PREFIXES.some((p) => rel.startsWith(p))) return [];
@@ -177,7 +177,15 @@ describe("rex seam guard", () => {
     ]) {
       assert.equal(tmuxImportViolations("src/x.ts", form).length, 1, form);
     }
-    assert.equal(execViolations("src/x.ts", 'execFileSync("rex", [])').length, 1);
+    const rexCall = (open, quote) => `execFileSync${open}${quote}rex${quote}, [])`;
+    for (const quote of ['"', "'", "`"]) {
+      for (const open of ["(", "(\n  ", "( "]) {
+        assert.equal(execViolations("src/x.ts", rexCall(open, quote)).length, 1, rexCall(open, quote));
+        assert.equal(execViolations("src/x.ts", `spawnSync${open}${quote}tmux${quote}, [])`).length, 1, `tmux ${quote}`);
+      }
+    }
+    assert.equal(execViolations("src/x.ts", "check('tmux', () => version())").length, 0);
+    assert.equal(execViolations("src/rexCli.ts", rexCall("(\n  ", '"')).length, 0);
     assert.equal(execViolations("src/x.ts", 'spawnSync("tmux", [])').length, 1);
     assert.equal(execViolations("src/x.ts", 'tmux("kill-pane")').length, 1);
     assert.equal(execViolations("src/x.ts", 'run("tmux", ["-V"])').length, 1);
