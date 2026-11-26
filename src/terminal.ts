@@ -5,7 +5,10 @@ import {
   rexBlockAlive,
   rexCapture,
   rexClose,
+  commandArgv,
+  envFromFlags,
   rexOwnership,
+  rexRespawn,
   rexProbe,
   rexRowProbe,
   rexSendKey,
@@ -119,6 +122,7 @@ export interface RespawnArgs {
   cwd: string;
   env: string[];
   command: string;
+  rex?: { projectId: number; projectName: string; record: (placed: { target: string; pid: string }) => void };
 }
 
 let rexInUseProbe: () => boolean = () => false;
@@ -166,9 +170,18 @@ export function splitPane({ argv, clientPath }: SplitArgs): { target: string; pi
   return { target, pid };
 }
 
-export function respawnPane({ target, cwd, env, command }: RespawnArgs): { target: string } {
+export function respawnPane({ target, cwd, env, command, rex }: RespawnArgs): { target: string } {
+  if (isRexTarget(target)) return rexRespawn(target, rexLeadSpec(rex, cwd, env, command), rex?.record);
   tmux("respawn-pane", "-k", "-t", target, "-c", cwd, ...env, command);
   return { target };
+}
+
+function rexLeadSpec(rex: RespawnArgs["rex"], cwd: string, env: string[], command: string) {
+  if (!rex) throw new Error("a Rex respawn needs the lead's project");
+  return {
+    projectId: rex.projectId, projectName: rex.projectName, label: `${rex.projectName}/lead`, cwd,
+    env: envFromFlags(env), argv: commandArgv(command), placement: "lead" as const, retainOnExit: false,
+  };
 }
 
 export function attachInteractive(argv: string[]): number {

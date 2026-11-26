@@ -36,7 +36,6 @@ const refuse = (operation: string): never => {
 };
 
 export const startProcess = (): never => refuse("hive.yml processes");
-export const respawnLead = (): never => refuse("lead handoff");
 export const floatHidden = (): never => refuse("hidden workers");
 
 export interface RexStore {
@@ -82,6 +81,7 @@ export interface RexBlock {
   subagents: number;
   window: string;
   session: string;
+  label: string;
   probed: boolean;
 }
 
@@ -357,6 +357,7 @@ export function rexProbe(target: string, server?: string): RexProbe {
 interface SnapshotEntry {
   session_id?: string;
   window_id?: string;
+  label?: string;
   probed?: boolean;
   process?: ProcessReply;
   program_status?: { records?: StatusRecord[] };
@@ -463,6 +464,7 @@ export function rexSnapshot(server?: string | null, extraBlocks: string[] = []):
       ...status,
       window: entry.window_id ?? "",
       session: entry.session_id ?? "",
+      label: entry.label ?? "",
       probed: entry.probed === true && entry.process !== undefined,
     });
   }
@@ -805,6 +807,51 @@ interface CreatedReply {
   block_ids?: (string | null)[] | null;
 }
 
+function blockOptions(spec: RexPaneSpec, size: { columns: number; rows: number } | undefined) {
+  return {
+    shell: "none",
+    login: false,
+    command: rexBlockCommand(spec.env, spec.argv),
+    cwd: spec.cwd,
+    exit: { on_completion: !spec.retainOnExit, quick_exit_threshold_ms: REX_QUICK_EXIT_MS },
+    ...(size ? { size } : {}),
+  };
+}
+
+export function rexRespawn(old: string, spec: RexPaneSpec, record: (placed: RexPlaced) => void = () => {}): { target: string; pid: string } {
+  const server = requireServer(old, null);
+  const session = rexSessionOf(server, old);
+  const size = spec.size ?? blockSize(server, session, old);
+  const created = rexApi<{ block_id?: string | null }>(server, "session.new_block", {
+    session_id: session, flavor: REX_SHELL_FLAVOR, label: spec.label, options: blockOptions(spec, size),
+  });
+  const target = created.block_id;
+  if (!target) throw new RexError(`rex created no block for ${spec.label}`, "bad_output", "");
+  let placed: RexPlaced;
+  try {
+    rexApi(server, "session.move_block", { session_id: session, block_id: target, anchor_block_id: old, side: "before" });
+    const probe = rexProbe(target, server);
+    if (probe.exited) quickExit(target, server);
+    placed = { target, socket: rexSocketOf(server), pid: probe.pid ?? "", window: "" };
+    record(placed);
+  } catch (err) {
+    bestEffort(() => rexClose(target, server));
+    throw err;
+  }
+  bestEffort(() => rexClose(old, server));
+  return { target, pid: placed.pid };
+}
+
+export function rexUnownedBlocks(server?: string | null): { block: string; label: string }[] | null {
+  const snap = rexSnapshot(server);
+  if (snap === null || !snap.answered || snap.incomplete) return null;
+  const owned = new Set(ownedBlocks(rexSocketOf(snap.server)));
+  const names = (sql().prepare("SELECT name FROM projects").all() as { name: string }[]).map((p) => `${p.name}/`);
+  return [...snap.blocks]
+    .filter(([id, b]) => !owned.has(id) && names.some((n) => b.label.startsWith(n)))
+    .map(([block, b]) => ({ block, label: b.label }));
+}
+
 export function rexCreatePane(spec: RexPaneSpec): RexPlaced {
   if (spec.placement === "hidden") floatHidden();
   if (store !== null && store.inTransaction === false) {
@@ -825,20 +872,7 @@ export function rexCreatePane(spec: RexPaneSpec): RexPlaced {
     session = anchor.session;
   }
   const size = spec.size ?? (spec.beside ? blockSize(server, session, spec.beside) : undefined);
-  const layout = {
-    block: {
-      flavor: REX_SHELL_FLAVOR,
-      label: spec.label,
-      options: {
-        shell: "none",
-        login: false,
-        command: rexBlockCommand(spec.env, spec.argv),
-        cwd: spec.cwd,
-        exit: { on_completion: !spec.retainOnExit, quick_exit_threshold_ms: REX_QUICK_EXIT_MS },
-        ...(size ? { size } : {}),
-      },
-    },
-  };
+  const layout = { block: { flavor: REX_SHELL_FLAVOR, label: spec.label, options: blockOptions(spec, size) } };
   let reply: CreatedReply;
   if (spec.placement === "split") {
     reply = rexApi<CreatedReply>(server, "session.new_split", {

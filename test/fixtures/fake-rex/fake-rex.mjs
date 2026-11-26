@@ -175,7 +175,8 @@ function execedProgram(command) {
     if (words[0] && words[0] !== "exec") return words[0];
     if (words[1]) return words[1];
   }
-  return program;
+  const tail = basename(program) === "sh" && command[i + 1] === "-c" && typeof script === "string" ? script.split("&&").at(-1).trim().match(/^exec\s+'?([^\s']+)/) : null;
+  return tail ? tail[1] : program;
 }
 
 function reapCompleted(state) {
@@ -509,6 +510,8 @@ const SCHEMAS = {
   "session.set_block_label": { keys: ["block_id", "label", "session_id"], required: ["session_id", "block_id"] },
   "session.set_window_label": { keys: ["label", "session_id", "window_id"], required: ["session_id", "window_id"] },
   "target.resolve": { keys: ["context", "kinds", "queries", "scope"], required: ["kinds", "queries"] },
+  "session.move_block": { keys: ["anchor_block_id", "block_id", "direction", "ratio", "session_id", "side"], required: ["session_id", "block_id", "anchor_block_id"] },
+  "block.close": { keys: ["block_id", "keep_last", "session_id", "undoable", "window_id"], required: ["session_id"] },
 };
 
 function checkSchema(method, params) {
@@ -518,6 +521,8 @@ function checkSchema(method, params) {
   for (const key of schema.required) if (params[key] === undefined || params[key] === null) fail("bad_request", `${method} needs ${key}`);
   if (method === "session.new_split" && !["horizontal", "vertical"].includes(params.direction)) fail("bad_request", "direction is horizontal or vertical");
   if (method === "session.new_split" && !["before", "after"].includes(params.side)) fail("bad_request", "side is before or after");
+  if (method === "session.move_block" && ![undefined, null, "horizontal", "vertical"].includes(params.direction)) fail("bad_request", "direction is horizontal or vertical");
+  if (method === "session.move_block" && ![undefined, null, "before", "after"].includes(params.side)) fail("bad_request", "side is before or after");
 }
 
 function apiCall(state, method, params) {
