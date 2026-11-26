@@ -99,6 +99,8 @@ One case does not tile. If a `visible: false` process is the thing that opens th
 
 `hive status` labels each running process `shown` or `hidden`, `hive doctor` reports one line counting them, and the dashboard gets a Processes card and section listing every process the project defines - running or not - with its state, where it is showing, and when it started.
 
+On Rex (`terminal: rex`), `wait_for_port` makes `hive start` wait up to 60 seconds for that port to be listening, or for any port with `true`, before it reports: `web: started (ports 3000, 9229)`, or `web: started; port 3000 not listening after 60s`, which leaves the process running. `hive status` and the dashboard also list each running Rex process's listening TCP ports. On tmux, `hive start` prints `wait_for_port needs terminal: rex; ignoring` and does not wait. A lead's `auto_start` never waits on either terminal.
+
 ### Allowed harnesses (`agents:`)
 
 Unlike `processes:`, which carries an arbitrary string hive executes, `agents:` needs no approval, and that is deliberate. Each `agents:` entry is checked against hive's own fixed table of known harnesses at parse time and dropped with a warning if it isn't one - the repo can only ever pick among names hive's code already recognizes, never smuggle in a command of its own. `agent_spawn`'s `harness` and `command` parameters are gated the same way: a command that resolves to a known harness (by basename) not in this list is refused; a command hive doesn't recognize as any harness at all was never part of this pool and is unaffected by it.

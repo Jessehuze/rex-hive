@@ -1151,19 +1151,92 @@ export function rexUnfloat(target: string, leadTarget: string, placement: "split
 
 export type RexVisibility = "shown" | "hidden" | "window";
 
+function visibilityIn(view: SessionView, target: string, leadTarget: string | null): RexVisibility | null {
+  const mine = placeOf(view, target);
+  if (!mine) return null;
+  if (mine.floating) return "hidden";
+  const lead = leadTarget ? placeOf(view, leadTarget) : null;
+  return lead && lead.window !== mine.window ? "window" : "shown";
+}
+
 export function rexVisibility(target: string, leadTarget: string | null, server?: string): RexVisibility | null {
   try {
     const resolved = requireServer(target, server);
-    const view = sessionView(resolved, rexSessionOf(resolved, target));
-    const mine = placeOf(view, target);
-    if (!mine) return null;
-    if (mine.floating) return "hidden";
-    const lead = leadTarget ? placeOf(view, leadTarget) : null;
-    return lead && lead.window !== mine.window ? "window" : "shown";
+    return visibilityIn(sessionView(resolved, rexSessionOf(resolved, target)), target, leadTarget);
   } catch {
     return null;
   }
 }
+
+export interface RexPort {
+  port: number;
+  address: string;
+}
+
+interface PortsReply {
+  id?: number;
+  status?: string;
+  truncated?: boolean;
+  ports?: { port?: unknown; address?: unknown; protocol?: unknown }[];
+}
+
+function readPortsReply(server: string, session: string, block: string): PortsReply {
+  const head = blockMethod<PortsReply>(server, session, block, "ports");
+  if (head.truncated !== true || head.id === undefined) return head;
+  return guarded(() => JSON.parse(readForward(server, session, block, head.id as number, 0)) as PortsReply, head);
+}
+
+function tcpListeners(reply: PortsReply): RexPort[] | null {
+  if (reply.status === "unsupported" || !Array.isArray(reply.ports)) return null;
+  return reply.ports
+    .filter((p) => p.protocol === "tcp" && Number.isInteger(p.port) && typeof p.address === "string")
+    .map((p) => ({ port: p.port as number, address: p.address as string }));
+}
+
+const portsIn = (server: string, session: string, target: string): RexPort[] | null =>
+  guarded(() => tcpListeners(readPortsReply(server, session, target)), null);
+
+export function rexPorts(target: string, server?: string): RexPort[] | null {
+  if (!target.startsWith("block:")) return null;
+  try {
+    const resolved = requireServer(target, server);
+    return portsIn(resolved, rexSessionOf(resolved, target), target);
+  } catch {
+    return null;
+  }
+}
+
+export function rexVisibilityAndPorts(target: string, server?: string): { visibility: RexVisibility | null; ports: RexPort[] | null } {
+  try {
+    const resolved = requireServer(target, server);
+    const session = rexSessionOf(resolved, target);
+    return { visibility: guarded(() => visibilityIn(sessionView(resolved, session), target, null), null), ports: portsIn(resolved, session, target) };
+  } catch {
+    return { visibility: null, ports: null };
+  }
+}
+
+export const REX_PORT_POLL_MS = 250;
+
+const portWanted = (ports: RexPort[], want: number | true): boolean => (want === true ? ports.length > 0 : ports.some((p) => p.port === want));
+
+export function rexAwaitPorts(target: string, want: number | true, timeoutMs = 60_000, server?: string): RexPort[] | null {
+  const deadline = Date.now() + timeoutMs;
+  let session: string | null = null;
+  for (;;) {
+    const resolved = guarded(() => requireServer(target, server), null);
+    if (resolved && session === null) session = guarded(() => rexSessionOf(resolved, target), null);
+    const ports = resolved && session ? portsIn(resolved, session, target) : null;
+    if (ports && portWanted(ports, want)) return ports;
+    if (ports === null) session = null;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return null;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(REX_PORT_POLL_MS, remaining));
+  }
+}
+
+export const waitForPort = (target: string, want: number | true, timeoutMs = 60_000, server?: string): boolean =>
+  rexAwaitPorts(target, want, timeoutMs, server) !== null;
 
 type Direction = "horizontal" | "vertical";
 

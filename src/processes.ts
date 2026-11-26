@@ -3,7 +3,7 @@ import type { ProcessSnapshot } from "./dashboard.js";
 import { db } from "./db.js";
 import { loadProjectYml } from "./projectYml.js";
 import { closeAgentRow, currentOwnership, killAgentPane, paneIdentity, relayoutAfterPaneLeft } from "./spawn.js";
-import { rexStopProcess, rexVisibility, rowServer } from "./terminal/rex.js";
+import { rexAwaitPorts, rexStopProcess, rexVisibilityAndPorts, rowServer, type RexPort } from "./terminal/rex.js";
 import {
   sessionName,
   type RowOwnership,
@@ -29,20 +29,42 @@ export function snapshotProcesses(projectId: number): ProcessSnapshot[] {
   const windows = rows.length > 0 ? projectWindows(sessionName(), projectId) : null;
   const running = new Set(rows.map((r) => r.name));
   return [
-    ...rows.map((r) => ({
-      name: r.name,
-      running: true,
+    ...rows.map((r) => {
+      if (isRexTarget(r.tmux_target)) {
+        const { visibility, ports } = rexVisibilityAndPorts(r.tmux_target, rowServer(r.tmux_socket, r.tmux_target) ?? undefined);
+        return { name: r.name, running: true, visibility, startedAt: r.created_at, ...(ports ? { ports: portNumbers(ports) } : {}) };
+      }
+      return {
+        name: r.name,
+        running: true,
 
-      // A row recorded on a socket this process cannot see into reads as unknown, never as a
-      // location: the pane id would name whatever holds it on THIS server.
-      visibility: isRexTarget(r.tmux_target) ? rexVisibility(r.tmux_target, null, rowServer(r.tmux_socket, r.tmux_target) ?? undefined) :
-        windows !== null && rowLive(r.tmux_socket, r.tmux_target) === true ? paneVisibility(r.tmux_target, windows) : null,
-      startedAt: r.created_at,
-    })),
+        // A row recorded on a socket this process cannot see into reads as unknown, never as a
+        // location: the pane id would name whatever holds it on THIS server.
+        visibility: windows !== null && rowLive(r.tmux_socket, r.tmux_target) === true ? paneVisibility(r.tmux_target, windows) : null,
+        startedAt: r.created_at,
+      };
+    }),
     ...defined
       .filter((name) => !running.has(name))
       .map((name) => ({ name, running: false, visibility: null, startedAt: null })),
   ];
+}
+
+const portNumbers = (ports: RexPort[]): number[] => [...new Set(ports.map((p) => p.port))].sort((a, b) => a - b);
+
+export const WAIT_FOR_PORT_TIMEOUT_MS = 60_000;
+export const WAIT_FOR_PORT_ON_TMUX = "wait_for_port needs terminal: rex; ignoring";
+
+function waitForPortTimeoutMs(): number {
+  const raw = Number(process.env.HIVE_WAIT_FOR_PORT_TIMEOUT_MS);
+  return Number.isInteger(raw) && raw > 0 ? Math.min(raw, WAIT_FOR_PORT_TIMEOUT_MS) : WAIT_FOR_PORT_TIMEOUT_MS;
+}
+
+export function awaitStartedPorts(row: Pick<StoppableRow, "tmux_target" | "tmux_socket">, want: number | true): string {
+  const timeoutMs = waitForPortTimeoutMs();
+  const ports = rexAwaitPorts(row.tmux_target, want, timeoutMs, rowServer(row.tmux_socket, row.tmux_target) ?? undefined);
+  if (ports) return ` (ports ${portNumbers(ports).join(", ")})`;
+  return `; ${want === true ? "no port" : `port ${want}`} not listening after ${Math.round(timeoutMs / 1000)}s`;
 }
 
 export const COMMAND_KIND = "command";
