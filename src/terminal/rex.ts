@@ -612,16 +612,60 @@ export function rexFinalScreen(target: string, lines: number, server?: string): 
   return rexCapture(target, Math.max(lines * 10, 200), false, server).split("\n").filter((row) => row.trim() !== "").slice(-lines).join("\n");
 }
 
-export function rexReapExited(agentId: number, target: string, server: string | null, snap: RexSnapshot | null | undefined, lines = 30): void {
+export const REX_REAP_MAX_FAILURES = 3;
+const REAP_PENDING_PREFIX = "terminal:rex:reap:";
+
+interface PendingReap {
+  agent: number;
+  target: string;
+  server: string;
+  failures: number;
+}
+
+function captureThenClose(pending: PendingReap, projectId: number, lines: number): void {
+  const key = `${REAP_PENDING_PREFIX}${pending.agent}`;
+  let screen: string;
+  try {
+    screen = rexFinalScreen(pending.target, lines, pending.server);
+  } catch {
+    const failures = pending.failures + 1;
+    if (failures <= REX_REAP_MAX_FAILURES) {
+      writeKv(projectId, key, JSON.stringify({ ...pending, failures }));
+      return;
+    }
+    screen = "";
+  }
+  if (screen && store !== null) sql().prepare("UPDATE agents SET exit_tail = ? WHERE id = ? AND exit_tail = ''").run(screen, pending.agent);
+  rexClose(pending.target, pending.server);
+  if (store !== null) sql().prepare("DELETE FROM kv WHERE project_id = ? AND key = ?").run(projectId, key);
+}
+
+export function rexReapExited(
+  row: { id: number; project_id: number }, target: string, server: string | null, snap: RexSnapshot | null | undefined, lines = 30,
+): void {
   try {
     if (!server) return;
     const seen = snap && snap.answered && snap.server === server ? snap.blocks.get(target) : undefined;
     const exited = seen ? seen.probed && seen.exited : rexProbe(target, server).exited;
     if (!exited) return;
-    const screen = guarded(() => rexFinalScreen(target, lines, server), "");
-    if (screen && store !== null) sql().prepare("UPDATE agents SET exit_tail = ? WHERE id = ? AND exit_tail = ''").run(screen, agentId);
-    rexClose(target, server);
+    captureThenClose({ agent: row.id, target, server, failures: 0 }, row.project_id, lines);
   } catch {}
+}
+
+export function rexReapPending(snap: RexSnapshot | null | undefined, lines = 30): void {
+  if (store === null) return;
+  const rows = guarded(
+    () => sql().prepare("SELECT project_id, value FROM kv WHERE key LIKE ?").all(`${REAP_PENDING_PREFIX}%`) as { project_id: number; value: string }[],
+    [],
+  );
+  for (const row of rows) {
+    try {
+      const pending = JSON.parse(row.value) as PendingReap;
+      const gone = snap?.answered === true && snap.server === pending.server && !snap.incomplete && !snap.blocks.has(pending.target);
+      if (gone) sql().prepare("DELETE FROM kv WHERE project_id = ? AND key = ?").run(row.project_id, `${REAP_PENDING_PREFIX}${pending.agent}`);
+      else captureThenClose(pending, row.project_id, lines);
+    } catch {}
+  }
 }
 
 export const REX_SHELL_FLAVOR = "com.superlogical.terminal.shell";
@@ -1164,10 +1208,27 @@ export function rexLayoutProject(projectId: number, layout: WindowLayout): { lin
   };
 }
 
+export const rexProjectLead = (projectId: number): { tmux_target: string; tmux_socket: string } | null =>
+  store === null ? null : guarded(() => runningLeadBlock(projectId), null);
+
+export const rexCannotTell = (name: string): string => `${name}: Rex could not be probed, so hive cannot tell where its block is`;
+
+function rexMinimized(target: string, server?: string): boolean | null {
+  try {
+    const resolved = requireServer(target, server);
+    const mine = placeOf(sessionView(resolved, rexSessionOf(resolved, target)), target);
+    return mine ? mine.floating && mine.minimized : null;
+  } catch {
+    return null;
+  }
+}
+
 export function rexHideProcess(projectId: number, name: string, target: string): string {
   const lead = runningLeadBlock(projectId);
   if (!lead) return `${name}: this project has no lead block to float it beside; run hive first`;
-  if (rexVisibility(target, lead.tmux_target) === "hidden") return `${name}: already hidden`;
+  const minimized = rexMinimized(target, rowServer(lead.tmux_socket, lead.tmux_target) ?? undefined);
+  if (minimized === null) return rexCannotTell(name);
+  if (minimized) return `${name}: already hidden`;
   rexFloatHidden(target, lead.tmux_target, rowServer(lead.tmux_socket, lead.tmux_target) ?? undefined);
   return `${name}: hidden`;
 }
@@ -1175,7 +1236,9 @@ export function rexHideProcess(projectId: number, name: string, target: string):
 export function rexShowProcess(projectId: number, name: string, target: string, placement: "split" | "window", windowLabel: string): string {
   const lead = runningLeadBlock(projectId);
   if (!lead) return `${name}: this project has no lead block to show it beside; run hive first`;
-  if (rexVisibility(target, lead.tmux_target) !== "hidden") return `${name}: already shown`;
+  const where = rexVisibility(target, lead.tmux_target, rowServer(lead.tmux_socket, lead.tmux_target) ?? undefined);
+  if (where === null) return rexCannotTell(name);
+  if (where !== "hidden") return `${name}: already shown`;
   rexUnfloat(target, lead.tmux_target, placement, windowLabel, rowServer(lead.tmux_socket, lead.tmux_target) ?? undefined);
   return `${name}: shown`;
 }

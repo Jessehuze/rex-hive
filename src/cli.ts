@@ -205,7 +205,7 @@ import {
   waitForPaneEstablished,
   windowLayout,
 } from "./terminal.js";
-import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexHideProcess, rexLayoutProject, rexRefuseQuickExit, rexShowProcess, rexVisibility } from "./terminal/rex.js";
+import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexHideProcess, rexLayoutProject, rexProjectLead, rexRefuseQuickExit, rexShowProcess, rexVisibility } from "./terminal/rex.js";
 import { collectCrew, crewStoreProblem } from "./crew.js";
 import { resumeWorker, validateResumeWorker } from "./agentResume.js";
 import { markWorkerLost } from "./workerRecovery.js";
@@ -2173,7 +2173,7 @@ function cmdLayout(argv: string[]): void {
   }
   const layout = config?.layout ?? DEFAULT_LAYOUT;
   const session = sessionName();
-  if (rexLeadFor(project.id, "")) {
+  if (rexProjectLead(project.id)) {
     const rex = withWindowClaim(() => rexLayoutProject(project.id, layout));
     console.log(rex.lines.join("\n"));
     process.exitCode = rex.exitCode;

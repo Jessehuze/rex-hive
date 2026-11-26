@@ -148,7 +148,7 @@ import {
   rowAliveProbe,
   rowLiveProbe,
   rowOwnership,
-  sendText, terminalOfRow, reapExitedBlock,
+  sendText, terminalOfRow, reapExitedBlock, reapPendingBlocks,
 } from "./terminal.js";
 import {
   appendTeardown,
@@ -507,6 +507,7 @@ export function janitor(snapshot: AliveSnapshot | null = liveTargets()): {
   let closedAgents = 0;
   let cancelledTimers = 0;
   const swept: CrewRowForRecord[] = [];
+  reapPendingBlocks(snapshot);
 
   const agents = stmt(
     `SELECT ${CREW_ROW_COLUMNS} FROM agents WHERE status = 'running' AND kind != ? AND tmux_target != ''
