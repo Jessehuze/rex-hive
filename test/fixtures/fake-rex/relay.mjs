@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, closeSync, openSync, readSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, openSync, readSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-const [dir, cwd, ...argv] = process.argv.slice(2);
+const [dir, cwd, statePath, ownerArg, ...argv] = process.argv.slice(2);
+const owner = Number(ownerArg);
 const input = join(dir, "input");
 const output = join(dir, "output");
 
@@ -29,6 +30,24 @@ const pump = setInterval(() => {
     if (fd !== undefined) closeSync(fd);
   }
 }, 20);
+
+const ownerGone = () => {
+  if (!existsSync(statePath)) return true;
+  if (!(owner > 0)) return false;
+  try {
+    process.kill(owner, 0);
+    return false;
+  } catch (err) {
+    return err.code !== "EPERM";
+  }
+};
+setInterval(() => {
+  if (!ownerGone()) return;
+  try {
+    process.kill(-process.pid, "SIGKILL");
+  } catch {}
+  process.exit(0);
+}, 1000);
 
 const finish = (exit) => {
   clearInterval(pump);

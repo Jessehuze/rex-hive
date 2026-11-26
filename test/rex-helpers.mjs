@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
+import { killRelays, liveRelays } from "../scripts/rex-relay-leaks.mjs";
 import { REPO } from "./helpers.mjs";
 
 export const FAKE_REX_DIR = join(REPO, "test", "fixtures", "fake-rex");
@@ -12,32 +13,10 @@ const callsPath = (tmp) => join(tmp, "fake-rex-calls.jsonl");
 const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
 
 function killAll(tmp) {
-  if (!existsSync(statePath(tmp))) return;
-  let state;
-  try {
-    state = readJson(statePath(tmp));
-  } catch {
-    return;
-  }
-  const pids = new Set(state.pids ?? []);
-  for (const block of Object.values(state.blocks ?? {})) {
-    if (block.relay_pid) pids.add(block.relay_pid);
-  }
-  for (const pid of pids) {
-    for (const target of [-pid, pid]) {
-      try {
-        process.kill(target, "SIGKILL");
-      } catch {}
-    }
-  }
-  for (const block of Object.values(state.blocks ?? {})) {
-    try {
-      if (block.child_pid) process.kill(block.child_pid, "SIGKILL");
-    } catch {}
-  }
+  killRelays(liveRelays(statePath(tmp)));
 }
 
-export function isolateRex(tmp) {
+export function isolateRex(tmp, { ownerPid = process.pid } = {}) {
   for (const key of Object.keys(process.env)) {
     if (key.startsWith("REX_") || key === "OSC7577_TOKEN" || key.startsWith("FAKE_REX_")) delete process.env[key];
   }
@@ -45,11 +24,17 @@ export function isolateRex(tmp) {
   process.env.PATH = `${FAKE_REX_DIR}${delimiter}${process.env.PATH ?? ""}`;
   process.env.REX_SERVER = `unix://${tmp}/fake-rex.sock`;
   process.env.FAKE_REX_STATE = statePath(tmp);
+  process.env.FAKE_REX_OWNER = String(ownerPid);
   writeFileSync(
     statePath(tmp),
-    JSON.stringify({ address: process.env.REX_SERVER, server: "running", revision: 0, sessions: [], windows: [], blocks: {}, closed: [], pids: [], performed: [] }),
+    JSON.stringify({ address: process.env.REX_SERVER, server: "running", revision: 0, sessions: [], windows: [], blocks: {}, closed: [], relays: [], performed: [] }),
   );
   writeFileSync(callsPath(tmp), "");
+  if (process.env.HIVE_REX_RELAY_MANIFEST) {
+    try {
+      appendFileSync(process.env.HIVE_REX_RELAY_MANIFEST, `${statePath(tmp)}\n`);
+    } catch {}
+  }
   process.on("exit", () => killAll(tmp));
   return {
     env: { ...process.env },
@@ -71,10 +56,19 @@ export function fakeRexDo(tmp, op, args = {}) {
   return JSON.parse(out);
 }
 
-const DIRECT_REX_EXEC = /\b(?:execFileSync|execFile|spawnSync|spawn|execSync|exec)\(\s*["'`]rex["'`]/;
+const REACHES_REX = [
+  /\brexCli\.js\b/,
+  /fake-rex/,
+  /\b(?:execFileSync|execFile|spawnSync|spawn|execSync|exec)\(\s*["'`]rex\b/,
+  /["'`](?:[^"'`\n]*[;&|]\s*)?rex\s+(?:--|-S\b|api\b|do\b|whoami\b|send-key\b|wait\b)/,
+  /=\s*["'`]rex["'`]/,
+];
+const TOP_LEVEL_ISOLATE = /^(?![\s/]).*\bisolateRex\(/m;
 
 export function rexCallScanViolations(rel, text) {
-  return DIRECT_REX_EXEC.test(text) ? [rel] : [];
+  if (rel === "test/rex-helpers.mjs") return [];
+  if (!REACHES_REX.some((re) => re.test(text))) return [];
+  return TOP_LEVEL_ISOLATE.test(text) ? [] : [rel];
 }
 
 export async function waitFor(check, { timeoutMs = 5000, stepMs = 25 } = {}) {

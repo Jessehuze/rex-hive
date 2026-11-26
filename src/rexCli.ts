@@ -7,7 +7,9 @@ const REX_MAX_BUFFER = 128 * 1024 * 1024;
 const DURATION = /^(?:\d+(?:\.\d+)?(?:ms|s|m|h))+$/;
 const NO_SERVER_EXIT = 4;
 const NO_SERVER = /no Rex server is running at /;
-const REX_TIMED_OUT = /deadline exceeded|timed out|i\/o timeout/i;
+const MAX_TIMEOUT_MS = 60_000;
+const STDIN_PARAMS_BYTES = 64 * 1024;
+const FAILURE_CACHE_MS = 30_000;
 const API_CODE = /\b(session_not_found|method_not_found|not_found|bad_request|conflict|unauthorized|forbidden|internal)\b/;
 
 export class RexError extends Error {
@@ -49,7 +51,8 @@ export function durationMs(text: string): number {
 
 export function rexTimeout(): string {
   const raw = process.env.HIVE_REX_TIMEOUT;
-  return raw && DURATION.test(raw) && durationMs(raw) > 0 ? raw : REX_TIMEOUT;
+  if (!raw || !DURATION.test(raw) || !(durationMs(raw) > 0)) return REX_TIMEOUT;
+  return `${Math.min(Math.ceil(durationMs(raw)), MAX_TIMEOUT_MS)}ms`;
 }
 
 interface ExecFailure {
@@ -59,33 +62,39 @@ interface ExecFailure {
   stderr?: string | Buffer;
 }
 
-function classify(err: unknown, verb: string, killMs: number): RexError {
+function classify(err: unknown, verb: string, killMs: number, timeoutMs: number, elapsedMs: number): RexError {
   const e = err as ExecFailure;
   const stderr = String(e.stderr ?? "").trim();
   if (e.code === "ENOENT") return new RexUnavailableError("rex is not installed or not on PATH", "ENOENT", stderr);
-  if (e.code === "ETIMEDOUT" || e.signal) {
-    return new RexTimeoutError(`rex ${verb} did not finish within ${killMs}ms and was killed`, stderr, killMs);
-  }
+  if (e.code === "ETIMEDOUT") return new RexTimeoutError(`rex ${verb} did not finish within ${killMs}ms and was killed`, stderr, killMs);
+  if (e.code === "ENOBUFS") return new RexError(`rex ${verb} printed more than ${REX_MAX_BUFFER} bytes`, "ENOBUFS", stderr);
+  if (e.signal) return new RexError(`rex ${verb} was killed by ${e.signal}`, `signal ${e.signal}`, stderr);
   if (e.status === NO_SERVER_EXIT || NO_SERVER.test(stderr)) return new RexUnavailableError(`the Rex server is unreachable: ${stderr}`, "unreachable", stderr);
-  if (REX_TIMED_OUT.test(stderr)) return new RexTimeoutError(`rex ${verb} timed out: ${stderr}`, stderr, durationMs(rexTimeout()));
+  if (elapsedMs >= timeoutMs) return new RexTimeoutError(`rex ${verb} failed after its ${timeoutMs}ms timeout: ${stderr}`, stderr, timeoutMs);
   const code = API_CODE.exec(stderr)?.[1] ?? `exit ${e.status ?? "?"}`;
   return new RexError(`rex ${verb} failed: ${stderr || code}`, code, stderr);
 }
 
-function rexRun(server: string | null, args: string[]): string {
+function rexRun(server: string | null, args: string[], input?: string): string {
+  if (process.env.NODE_TEST_CONTEXT && !process.env.FAKE_REX_STATE) {
+    throw new RexError("refusing to run rex under the test runner without isolateRex()", "test-isolation", "");
+  }
   const timeout = rexTimeout();
   const argv = ["--autostart=false", "--timeout", timeout, ...(server ? ["-S", server] : []), ...args];
-  const killMs = durationMs(timeout) + KILL_MARGIN_MS;
+  const timeoutMs = durationMs(timeout);
+  const killMs = timeoutMs + KILL_MARGIN_MS;
+  const started = Date.now();
   try {
     return execFileSync("rex", argv, {
       encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+      input,
       maxBuffer: REX_MAX_BUFFER,
       timeout: killMs,
       killSignal: "SIGKILL",
     });
   } catch (err) {
-    throw classify(err, args[0] ?? "", killMs);
+    throw classify(err, args[0] ?? "", killMs, timeoutMs, Date.now() - started);
   }
 }
 
@@ -100,7 +109,9 @@ function parseJson<T>(stdout: string, verb: string): T {
 }
 
 export function rexApi<T>(server: string, method: string, params: object): T {
-  return parseJson<T>(rexRun(server, ["api", "call", method, JSON.stringify(params)]), method);
+  const json = JSON.stringify(params);
+  const viaStdin = Buffer.byteLength(json) > STDIN_PARAMS_BYTES;
+  return parseJson<T>(rexRun(server, ["api", "call", method, viaStdin ? "-" : json], viaStdin ? json : undefined), method);
 }
 
 export function rexKey(server: string, block: string, key: string): void {
@@ -117,16 +128,19 @@ function endpointOf(who: unknown): string | null {
 }
 
 let cachedServer: string | null = null;
+let failedAt: number | null = null;
 
 export function defaultRexServer(): string | null {
   const fromEnv = process.env.REX_SERVER;
   if (fromEnv) return fromEnv;
   if (cachedServer) return cachedServer;
+  if (failedAt !== null && Date.now() - failedAt < FAILURE_CACHE_MS) return null;
   try {
     cachedServer = endpointOf(JSON.parse(rexRun(null, ["whoami", "--json"])));
   } catch {
-    return null;
+    cachedServer = null;
   }
+  failedAt = cachedServer ? null : Date.now();
   return cachedServer;
 }
 

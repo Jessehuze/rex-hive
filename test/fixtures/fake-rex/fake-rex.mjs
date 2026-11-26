@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, openSync, closeSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -40,17 +40,36 @@ function writeState(state) {
   renameSync(tmp, STATE);
 }
 
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === "EPERM";
+  }
+}
+
+function lockAbandoned() {
+  try {
+    const holder = Number(readFileSync(LOCK, "utf8"));
+    if (holder > 0) return !pidAlive(holder);
+    return Date.now() - statSync(LOCK).mtimeMs > 5000;
+  } catch {
+    return false;
+  }
+}
+
 function withLock(fn) {
   const deadline = Date.now() + 15000;
   for (;;) {
     try {
-      closeSync(openSync(LOCK, "wx"));
+      const fd = openSync(LOCK, "wx");
+      writeSync(fd, String(process.pid));
+      closeSync(fd);
       break;
     } catch (err) {
       if (err.code !== "EEXIST") throw err;
-      try {
-        if (Date.now() - statSync(LOCK).mtimeMs > 5000) rmSync(LOCK, { force: true });
-      } catch {}
+      if (lockAbandoned()) rmSync(LOCK, { force: true });
       if (Date.now() > deadline) throw new Error("fake rex: state lock timed out");
       sleepMs(5);
     }
@@ -116,7 +135,7 @@ function requireBlock(state, params) {
 function childEnv(state, block) {
   const env = {};
   for (const [k, v] of Object.entries(process.env)) {
-    if (k.startsWith("REX_") || k === "OSC7577_TOKEN" || k === "FAKE_REX_HANG" || k === "FAKE_REX_FAIL_ON") continue;
+    if (k.startsWith("REX_") || k === "OSC7577_TOKEN" || (k.startsWith("FAKE_REX_") && k !== "FAKE_REX_STATE" && k !== "FAKE_REX_OWNER")) continue;
     env[k] = v;
   }
   env.REX_SERVER = state.address;
@@ -137,14 +156,14 @@ function startProcess(state, block) {
   mkdirSync(block.dir, { recursive: true });
   writeFileSync(join(block.dir, "input"), "");
   writeFileSync(join(block.dir, "output"), "");
-  const relay = spawn(process.execPath, [RELAY, block.dir, block.cwd, ...block.command], {
+  const owner = process.env.FAKE_REX_OWNER ?? "0";
+  const relay = spawn(process.execPath, [RELAY, block.dir, block.cwd, STATE, owner, ...block.command], {
     detached: true,
     stdio: "ignore",
     env: childEnv(state, block),
   });
   relay.unref();
   block.relay_pid = relay.pid;
-  state.pids.push(relay.pid);
   const pidFile = join(block.dir, "child.pid");
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
@@ -156,6 +175,11 @@ function startProcess(state, block) {
     if (existsSync(join(block.dir, "exit.json"))) break;
     sleepMs(10);
   }
+  state.relays.push({ relay_pid: block.relay_pid, child_pid: block.child_pid, block_id: block.block_id });
+}
+
+function forgetRelay(state, block) {
+  state.relays = state.relays.filter((r) => r.relay_pid !== block.relay_pid);
 }
 
 function killProcess(block) {
@@ -242,6 +266,7 @@ function removeFromWindow(state, block, { closeEmpty = true } = {}) {
 
 function closeBlock(state, block) {
   killProcess(block);
+  forgetRelay(state, block);
   removeFromWindow(state, block);
   delete state.blocks[block.block_id];
   state.closed.push(block.block_id);
@@ -573,6 +598,7 @@ function fakeOp(op, raw) {
       case "restartServer":
         for (const block of Object.values(state.blocks)) {
           killProcess(block);
+          forgetRelay(state, block);
           startProcess(state, block);
         }
         state.server = "running";
@@ -666,6 +692,15 @@ function main(argv) {
   if (!global.timeout) {
     process.stderr.write("fake rex: refusing a call without --timeout\n");
     return 3;
+  }
+  if (process.env.FAKE_REX_SELF_KILL) {
+    process.kill(process.pid, process.env.FAKE_REX_SELF_KILL);
+    sleepMs(5000);
+  }
+  if (process.env.FAKE_REX_SLOW_EXIT1 === "1") {
+    sleepMs(durationMs(global.timeout));
+    process.stderr.write("Error: fake slow failure\n");
+    return 1;
   }
   const state = readState();
   const server = global.server ?? process.env.REX_SERVER ?? state.address;

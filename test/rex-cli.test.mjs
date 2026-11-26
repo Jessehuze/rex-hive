@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -62,6 +62,33 @@ const alive = (pid) => {
   }
 };
 
+const BLOCK_CHILD = (dir, ownerPid, hold) => `const { isolateRex } = await import(${JSON.stringify(join(REPO, "test", "rex-helpers.mjs"))});
+const { execFileSync } = await import("node:child_process");
+const f = isolateRex(${JSON.stringify(dir)}${ownerPid ? `, { ownerPid: ${ownerPid} }` : ""});
+const bin = "rex";
+execFileSync(bin, ["--autostart=false", "--timeout", "10s", "-S", f.env.REX_SERVER, "api", "call", "session.create",
+  JSON.stringify({ initial_windows: [{ layout: { block: { flavor: "com.superlogical.terminal.shell", options: { command: ["sleep", "60"] } } } }] })]);
+console.log(JSON.stringify({ relays: f.state().relays }));
+${hold ? "setInterval(() => {}, 1 << 30);" : ""}`;
+
+function runBlockChild(dir, { ownerPid } = {}) {
+  const out = execFileSync(process.execPath, ["--input-type=module", "-e", BLOCK_CHILD(dir, ownerPid, false)], { encoding: "utf8" });
+  return JSON.parse(out);
+}
+
+function spawnBlockChild(dir, { ownerPid } = {}) {
+  const proc = spawn(process.execPath, ["--input-type=module", "-e", BLOCK_CHILD(dir, ownerPid, true)], { stdio: ["ignore", "pipe", "inherit"] });
+  const ready = new Promise((resolve, reject) => {
+    let buf = "";
+    proc.stdout.on("data", (d) => {
+      buf += d;
+      if (buf.includes("\n")) resolve(JSON.parse(buf.split("\n")[0]));
+    });
+    proc.once("exit", (code) => reject(new Error(`block child exited early with ${code}`)));
+  });
+  return { proc, ready };
+}
+
 function runDefaultServerChild(env) {
   const src = `const m = await import(${JSON.stringify(join(REPO, "dist", "rexCli.js"))});\nconsole.log(JSON.stringify([m.defaultRexServer(), m.defaultRexServer()]));`;
   const out = execFileSync(process.execPath, ["--input-type=module", "-e", src], { env, encoding: "utf8" });
@@ -115,8 +142,41 @@ describe("rex CLI wrapper", () => {
     assert.ok(elapsed >= 1000 && elapsed < 6000, `killed after ${elapsed}ms`);
     const hung = fake.calls().slice(before);
     assert.equal(hung.length, 1);
-    assert.equal(hung[0].argv[hung[0].argv.indexOf("--timeout") + 1], "1s");
+    assert.equal(hung[0].argv[hung[0].argv.indexOf("--timeout") + 1], "1000ms");
     assert.equal(alive(hung[0].pid), false, "the hung rex process was killed");
+  });
+
+  it("a rex that fails only after its --timeout has elapsed is a RexTimeoutError, not a plain failure", async () => {
+    const { rexApi, RexTimeoutError } = await cli();
+    const started = Date.now();
+    withEnvVars({ FAKE_REX_SLOW_EXIT1: "1", HIVE_REX_TIMEOUT: "1s" }, () => {
+      assert.throws(() => rexApi(REX_ADDR, "session.list", {}), (e) => e instanceof RexTimeoutError && e.timeoutMs === 1000 && /fake slow failure/.test(e.stderr));
+    });
+    assert.ok(Date.now() - started < 3000, "classified from rex's own exit, before the kill bound");
+  });
+
+  it("a rex killed by a signal is a RexError naming the signal, never a timeout", async () => {
+    const { rexApi, RexError, RexTimeoutError } = await cli();
+    withEnvVars({ FAKE_REX_SELF_KILL: "SIGTERM" }, () => {
+      assert.throws(() => rexApi(REX_ADDR, "session.list", {}), (e) => e instanceof RexError && !(e instanceof RexTimeoutError) && e.code === "signal SIGTERM");
+    });
+  });
+
+  it("HIVE_REX_TIMEOUT is rounded up to whole milliseconds and clamped to 60s; junk falls back to 10s", async () => {
+    const { rexTimeout } = await cli();
+    const cases = { "1.5ms": "2ms", "2s": "2000ms", "1000h": "60000ms", "0s": "10s", banana: "10s", "-1s": "10s" };
+    for (const [raw, want] of Object.entries(cases)) assert.equal(withEnvVars({ HIVE_REX_TIMEOUT: raw }, rexTimeout), want, raw);
+    assert.equal(withEnvVars({ HIVE_REX_TIMEOUT: undefined }, rexTimeout), "10s");
+  });
+
+  it("under the test runner rexRun refuses without FAKE_REX_STATE, before spawning anything", async () => {
+    const { rexApi, RexError } = await cli();
+    assert.ok(process.env.NODE_TEST_CONTEXT, "this file runs under node --test");
+    const before = fake.calls().length;
+    withEnvVars({ FAKE_REX_STATE: undefined }, () => {
+      assert.throws(() => rexApi(REX_ADDR, "session.list", {}), (e) => e instanceof RexError && e.code === "test-isolation");
+    });
+    assert.equal(fake.calls().length, before);
   });
 
   it("a missing rex binary raises RexUnavailableError with code ENOENT", async () => {
@@ -152,6 +212,19 @@ describe("rex CLI wrapper", () => {
     assert.equal(call.argv.at(-2), "block.event");
     const recorded = fake.state().blocks[b.block].events.filter((e) => e.type === "paste");
     assert.deepEqual(recorded.map((e) => e.payload.text), ['a b $X "q"']);
+  });
+
+  it("params over 64 KiB travel on stdin as -, not argv, and arrive intact", async () => {
+    const { rexApi } = await cli();
+    const b = await newBlock(["sleep", "30"], "big");
+    const text = "x".repeat(200 * 1024);
+    const before = realCalls().length;
+    rexApi(REX_ADDR, "block.event", { session_id: b.session, block_id: b.block, event: { type: "paste", payload: { text } } });
+    const [call] = realCalls().slice(before);
+    assert.deepEqual(call.argv.slice(-3), ["call", "block.event", "-"]);
+    const pasted = fake.state().blocks[b.block].events.filter((e) => e.type === "paste");
+    assert.equal(pasted.length, 1);
+    assert.equal(pasted[0].payload.text, text);
   });
 
   it("rexLua runs do -e with --json and returns the parsed snapshot naming each block's pid", async () => {
@@ -207,7 +280,9 @@ describe("rex CLI wrapper", () => {
     try {
       const down = { ...fake.env };
       delete down.REX_SERVER;
+      const before = realCalls().filter((c) => c.argv.includes("whoami")).length;
       assert.deepEqual(runDefaultServerChild(down), [null, null]);
+      assert.equal(realCalls().filter((c) => c.argv.includes("whoami")).length - before, 1, "the failure is cached, not retried");
     } finally {
       fakeRexDo(tmp, "restartServer");
     }
@@ -264,22 +339,78 @@ describe("fake rex", () => {
     assert.ok(lines.includes(`REX_SERVER=${REX_ADDR}`));
   });
 
-  it("isolateRex's exit cleanup kills every block process the file started", async () => {
+  it("isolateRex's exit cleanup kills every block process the file started, with the owner watch out of play", async () => {
+    const { relays } = await runBlockChild(mkdtempSync(join(tmp, "child-")), { ownerPid: process.pid });
+    assert.equal(relays.length, 1);
+    await waitFor(() => relays.every((r) => !alive(r.child_pid) && !alive(r.relay_pid)));
+  });
+
+  it("a test process killed by SIGTERM takes its relays with it, through the relay's owner watch", async () => {
+    const child = spawnBlockChild(mkdtempSync(join(tmp, "sigterm-")));
+    const { relays } = await child.ready;
+    assert.ok(relays.every((r) => alive(r.relay_pid) && alive(r.child_pid)));
+    child.proc.kill("SIGTERM");
+    await waitFor(() => relays.every((r) => !alive(r.child_pid) && !alive(r.relay_pid)), { timeoutMs: 4000 });
+  });
+
+  it("the runner's relay check reports and kills a relay whose owner is still alive", async () => {
+    const { checkRelayLeaks, describeRelayLeaks } = await import("../scripts/rex-relay-leaks.mjs");
+    const dir = mkdtempSync(join(tmp, "leak-"));
+    const child = spawnBlockChild(dir, { ownerPid: process.pid });
+    const { relays } = await child.ready;
+    child.proc.kill("SIGKILL");
+    await new Promise((r) => child.proc.once("exit", r));
+    assert.ok(relays.every((r) => alive(r.relay_pid)), "the relay survived its SIGKILLed test process");
+    const manifest = join(dir, "manifest");
+    writeFileSync(manifest, `${join(dir, "fake-rex.json")}\n`);
+    const result = checkRelayLeaks(manifest, { settleMs: 0 });
+    assert.deepEqual(result.leaked.map((r) => r.relay_pid), relays.map((r) => r.relay_pid));
+    assert.match(describeRelayLeaks(result)[0], /^1 fake rex relay\(s\) outlived/);
+    await waitFor(() => relays.every((r) => !alive(r.relay_pid) && !alive(r.child_pid)));
+    assert.deepEqual(checkRelayLeaks(manifest, { settleMs: 0 }).leaked, []);
+  });
+
+  it("cleanup signals only pids that are still this fake's relays, and a closed block's relay is forgotten", async () => {
+    const { liveRelays } = await import("../scripts/rex-relay-leaks.mjs");
+    const b = await newBlock(["sleep", "30"], "forget");
+    const relayPid = fake.state().blocks[b.block].relay_pid;
+    assert.ok(fake.state().relays.some((r) => r.relay_pid === relayPid));
+    fakeRexDo(tmp, "closeBlock", { block_id: b.block });
+    assert.equal(fake.state().relays.some((r) => r.relay_pid === relayPid), false);
+    const planted = join(mkdtempSync(join(tmp, "planted-")), "state.json");
+    writeFileSync(planted, JSON.stringify({ relays: [{ relay_pid: process.pid, child_pid: 0, block_id: "block:x" }] }));
+    assert.deepEqual(liveRelays(planted), []);
+  });
+
+  it("isolateRex strips REX_BLOCK, REX_SESSION and OSC7577_TOKEN that were planted before it ran", () => {
     const helpers = join(REPO, "test", "rex-helpers.mjs");
-    const dir = mkdtempSync(join(tmp, "child-"));
-    const src = `
-const { isolateRex } = await import(${JSON.stringify(helpers)});
-const { execFileSync } = await import("node:child_process");
+    const dir = mkdtempSync(join(tmp, "strip-"));
+    const src = `const { isolateRex } = await import(${JSON.stringify(helpers)});
 const f = isolateRex(${JSON.stringify(dir)});
-const bin = "rex";
-execFileSync(bin, ["--autostart=false", "--timeout", "10s", "-S", f.env.REX_SERVER, "api", "call", "session.create",
-  JSON.stringify({ initial_windows: [{ layout: { block: { flavor: "com.superlogical.terminal.shell", options: { command: ["sleep", "60"] } } } }] })]);
-const pids = Object.values(f.state().blocks).map((b) => b.child_pid);
-console.log(JSON.stringify(pids));`;
-    const out = execFileSync(process.execPath, ["--input-type=module", "-e", src], { encoding: "utf8" });
-    const pids = JSON.parse(out);
-    assert.equal(pids.length, 1);
-    await waitFor(() => !alive(pids[0]));
+const keys = ["REX_BLOCK", "REX_SESSION", "OSC7577_TOKEN", "REX_CLIENT"];
+console.log(JSON.stringify({ env: keys.map((k) => process.env[k] ?? null), returned: keys.map((k) => f.env[k] ?? null), server: f.env.REX_SERVER }));`;
+    const planted = { ...process.env, REX_BLOCK: "planted-block", REX_SESSION: "planted-session", OSC7577_TOKEN: "planted-token", REX_CLIENT: "planted-client", REX_SERVER: "unix:///planted.sock" };
+    const out = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", src], { env: planted, encoding: "utf8" }));
+    assert.deepEqual(out.env, [null, null, null, null]);
+    assert.deepEqual(out.returned, [null, null, null, null]);
+    assert.equal(out.server, `unix://${dir}/fake-rex.sock`);
+  });
+
+  it("the state lock waits for a live holder and is stolen only from a dead one", async () => {
+    const { rexApi } = await cli();
+    const lock = join(tmp, "fake-rex.json.lock");
+    const dead = spawnSync(process.execPath, ["-e", "process.exit(0)"]).pid;
+    assert.equal(alive(dead), false);
+    writeFileSync(lock, String(dead));
+    assert.ok(Array.isArray(rexApi(REX_ADDR, "session.list", {}).sessions), "a dead holder's lock is stolen");
+    writeFileSync(lock, String(process.pid));
+    const bin = "rex";
+    const waiting = spawn(bin, ["--autostart=false", "--timeout", "10s", "-S", REX_ADDR, "api", "call", "session.list"], { env: fake.env, stdio: "ignore" });
+    const exited = new Promise((r) => waiting.once("exit", r));
+    const early = await Promise.race([exited.then(() => "exited"), new Promise((r) => setTimeout(() => r("waiting"), 6000))]);
+    assert.equal(early, "waiting", "a live holder's lock is not stolen, even after 5s");
+    rmSync(lock, { force: true });
+    assert.equal(await exited, 0);
   });
 
   it("stopServer fails every call with real rex's exit 4 and no-server message until restartServer", () => {
@@ -332,14 +463,23 @@ describe("no real rex in tests", () => {
   const q = ['"', "'", "`"];
   const call = (fn, quote, gap = "") => `${fn}(${gap}${quote}rex${quote}, ["api"])`;
 
-  it("the scan flags every direct exec form and quote style, and spares PATH-resolved names", () => {
-    for (const fn of ["execFileSync", "spawnSync", "spawn", "execFile"]) {
-      for (const quote of q) {
-        assert.equal(rexCallScanViolations("test/x.test.mjs", call(fn, quote)).length, 1, call(fn, quote));
-        assert.equal(rexCallScanViolations("test/x.test.mjs", call(fn, quote, "\n  ")).length, 1, `${fn} multi-line`);
-      }
+  it("the scan fails every way a test can reach rex unless isolateRex is called at module top level", () => {
+    const reaches = [
+      ...["execFileSync", "spawnSync", "spawn", "execFile"].flatMap((fn) => q.flatMap((quote) => [call(fn, quote), call(fn, quote, "\n  ")])),
+      'execSync("rex whoami --json")',
+      'execFileSync("/bin/sh", ["-c", "rex --autostart=false whoami"])',
+      'execSync("cd /x && rex api call session.list")',
+      'const bin = "rex"; spawnSync(bin, [])',
+      'const m = await import("../dist/rexCli.js");',
+      'const p = join(REPO, "dist", "rexCli.js");',
+      'const fake = join(REPO, "test", "fixtures", "fake-rex", "rex");',
+    ];
+    for (const text of reaches) {
+      assert.deepEqual(rexCallScanViolations("test/x.test.mjs", text), ["test/x.test.mjs"], text);
+      assert.deepEqual(rexCallScanViolations("test/x.test.mjs", `const f = isolateRex(tmp);\n${text}`), [], `isolated: ${text}`);
+      assert.deepEqual(rexCallScanViolations("test/x.test.mjs", `function g() {\n  isolateRex(tmp);\n}\n${text}`), ["test/x.test.mjs"], `nested: ${text}`);
     }
-    for (const clean of ['const bin = "rex"; execFileSync(bin, [])', 'execFileSync("rexy", [])', 'spawnSync("tmux", [])']) {
+    for (const clean of ['execFileSync("rexy", [])', 'spawnSync("tmux", [])', 'const allow = ["src/rexCli.ts"];', 'HIVE_TERMINAL: "rex"']) {
       assert.deepEqual(rexCallScanViolations("test/x.test.mjs", clean), [], clean);
     }
   });
