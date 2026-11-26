@@ -139,19 +139,23 @@ function childEnv(state, block) {
     if (k.startsWith("REX_") || k.startsWith("HIVE_") || k === "OSC7577_TOKEN" || (k.startsWith("FAKE_REX_") && k !== "FAKE_REX_STATE" && k !== "FAKE_REX_OWNER")) continue;
     env[k] = v;
   }
+  if (!loginWrapped(block)) env.PATH = MINIMAL_PATH;
   env.REX_SERVER = state.address;
   env.REX_BLOCK = block.block_id;
   env.REX_SESSION = block.session_id;
   return env;
 }
 
-const BLOCK_OPTION_KEYS = new Set(["shell", "command", "cwd", "exit", "size", "interactive"]);
+const BLOCK_OPTION_KEYS = new Set(["args", "command", "cwd", "exit", "initial_input", "interactive", "login", "path_prepend", "shell", "size", "theme"]);
+const EXIT_OPTION_KEYS = new Set(["on_completion", "quick_exit_threshold_ms"]);
+const MINIMAL_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
+const loginWrapped = (block) => block.options?.login !== false;
 
 function checkOptions(options) {
   if (options === undefined) return;
   for (const key of Object.keys(options)) if (!BLOCK_OPTION_KEYS.has(key)) fail("bad_request", `unknown block option ${key}`);
   if (options.shell === "none" && !Array.isArray(options.command)) fail("bad_request", "shell none needs command as an argv array");
-  if (options.exit !== undefined && (typeof options.exit !== "object" || Object.keys(options.exit).some((k) => k !== "on_completion"))) fail("bad_request", "exit is {on_completion}");
+  if (options.exit !== undefined && (typeof options.exit !== "object" || Object.keys(options.exit).some((k) => !EXIT_OPTION_KEYS.has(k)))) fail("bad_request", "exit is {on_completion, quick_exit_threshold_ms}");
 }
 
 const ENV_WORD = /^[A-Za-z_][A-Za-z0-9_]*=/;
@@ -298,6 +302,11 @@ function exitOf(block) {
 }
 
 function screenOf(block) {
+  const banner = loginWrapped(block) ? "Last login: Thu Jan  1 00:00:00 on ttys000\n" : "";
+  return Buffer.concat([Buffer.from(banner), rawScreenOf(block)]);
+}
+
+function rawScreenOf(block) {
   const big = join(block.dir, "screen");
   if (existsSync(big)) return readFileSync(big);
   if (block.screen !== null) return Buffer.from(block.screen);
@@ -330,7 +339,11 @@ function jsonBoundedSlice(buf, start, maxBytes) {
 }
 
 function processInfo(block) {
-  const exit = exitOf(block);
+  const exit = exitOf(block) && loginWrapped(block) ? { exit_code: 0 } : exitOf(block);
+  if (loginWrapped(block) && block.child_pid && !exit) {
+    const login = { pid: block.child_pid, name: "login", argv0: null, cwd: block.cwd, user: process.env.USER ?? "", user_id: process.getuid?.() ?? 0 };
+    return { child: login, foreground: login, home: FAKE_HOME, last_exit: null };
+  }
   const proc = block.child_pid && !exit
     ? { pid: block.child_pid, name: basename(execedProgram(block.command)), argv0: execedProgram(block.command), path: execedProgram(block.command), invoked_path: execedProgram(block.command), cwd: block.cwd, user: process.env.USER ?? "", user_id: process.getuid?.() ?? 0 }
     : null;

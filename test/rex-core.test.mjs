@@ -37,7 +37,7 @@ const paramsOf = (call) => {
 function newBlock(label, command = ["sleep", "600"], size = undefined) {
   const made = rexApi(REX_ADDR, "session.create", {
     label: `s-${label}`,
-    initial_windows: [{ window_label: label, layout: { block: { flavor: "com.superlogical.terminal.shell", label, options: { shell: "none", command, ...(size ? { size } : {}) } } } }],
+    initial_windows: [{ window_label: label, layout: { block: { flavor: "com.superlogical.terminal.shell", label, options: { shell: "none", login: false, command, ...(size ? { size } : {}) } } } }],
   });
   return { session: made.session_id, window: made.initial_windows[0].window_id, block: made.initial_windows[0].block_ids[0] };
 }

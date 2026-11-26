@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 
 import { clearHiveEnv, isolateTmux, seedTrustedYml, leadRow, makeFakeClaude, McpClient, runCli, scratchDirs } from "./helpers.mjs";
@@ -149,7 +149,7 @@ describe("Rex leads", () => {
   it("hive lead inside Rex uses the caller's session and never renames it", async () => {
     const made = rexApi(REX_ADDR, "session.create", {
       label: "user-session",
-      initial_windows: [{ window_label: "mine", layout: { block: { flavor: "com.superlogical.terminal.shell", label: "me", options: { shell: "none", command: ["sleep", "600"] } } } }],
+      initial_windows: [{ window_label: "mine", layout: { block: { flavor: "com.superlogical.terminal.shell", label: "me", options: { shell: "none", login: false, command: ["sleep", "600"] } } } }],
     });
     const caller = made.initial_windows[0].block_ids[0];
     const dir = freshProject("rex-caller");
@@ -263,8 +263,10 @@ describe("Rex workers", () => {
     const env = readFileSync(dump, "utf8").split("\n");
     assert.ok(env.includes(`HIVE_AGENT_ID=${row.actor_id}`), env.join("\n"));
     assert.ok(env.includes("HIVE_PROJECT_LOCK=1"));
+    assert.ok(env.includes(`PATH=${withClaude().PATH}`), "the block's PATH is the one hive passes, not the minimal login:false PATH");
     const block = fake.state().blocks[row.tmux_target];
-    assert.equal(block.command[0], "env");
+    assert.equal(block.command[0], "/usr/bin/env");
+    assert.equal(basename(terminal.paneCurrentCommand(row.tmux_target) ?? ""), "claude", "a login-wrapped block reports no program");
     assert.equal(terminal.rowOwnership(row), "live", "argv0 after env execs is the recorded program");
   });
 
@@ -282,10 +284,11 @@ describe("Rex workers", () => {
     assert.ok(!labels.includes(`${project.name}/w-quick`), labels.join(","));
     assert.equal(workerRow(project.id, "w-quick"), undefined);
 
-    const receipt = await mcp.call("agent_spawn", { name: "w-quick-claude", command: fakeClaude("echo 'claude: config is broken'; exit 3") });
-    assert.equal(receipt.exited, true, JSON.stringify(receipt));
-    assert.match(receipt.tail, /claude: config is broken/);
-    assert.equal(fake.state().blocks[receipt.tmux_target], undefined);
+    const reported = await mcp
+      .call("agent_spawn", { name: "w-quick-claude", command: fakeClaude("echo 'claude: config is broken'; exit 3") })
+      .then((receipt) => (assert.equal(receipt.exited, true, JSON.stringify(receipt)), receipt.tail), (err) => err.message);
+    assert.match(reported, /claude: config is broken/);
+    assert.ok(!Object.values(fake.state().blocks).some((b) => b.label === `${project.name}/w-quick-claude`));
   });
 
   it("Rex worker brief forbids touching Rex blocks; tmux brief does not", async () => {
@@ -306,6 +309,39 @@ describe("Rex workers", () => {
     assert.ok(argv.includes("it's \"quoted\" $HOME `x` a;b"), JSON.stringify(argv));
     assert.ok(argv.includes("/tmp/b r.md"));
     assert.deepEqual(commandArgv("npm run dev && claude"), ["/bin/sh", "-c", "npm run dev && claude"]);
+  });
+});
+
+describe("Rex ownership of what hive launched", () => {
+  it("ownership reads the program behind /usr/bin/env, its PATH= word and env assignments", async () => {
+    const dir = freshProject("rex-own-env");
+    const { project } = await startLead(dir);
+    const lead = leadRow(db, project.id);
+    const session = fake.state().blocks[lead.tmux_target].session_id;
+    const layout = { block: { flavor: "com.superlogical.terminal.shell", label: "raw", options: { shell: "none", login: false, command: ["/usr/bin/env", "PATH=/usr/bin:/bin", "FOO=1", "sleep", "600"] } } };
+    const made = rexApi(REX_ADDR, "session.new_split", { session_id: session, anchor_id: lead.tmux_target, direction: "horizontal", side: "after", layout, focus: false });
+    const block = made.block_ids[0];
+    const pid = String(fake.state().blocks[block].child_pid);
+    const row = (command) => ({ tmux_target: block, tmux_socket: SOCKET, pane_pid: pid, command });
+    assert.equal(terminal.rowOwnership(row("sleep 600")), "live");
+    assert.equal(terminal.rowOwnership(row("/usr/bin/env PATH=/x FOO=1 sleep 600")), "live");
+    assert.equal(terminal.rowOwnership(row("claude")), "reissued");
+  });
+
+  it("a hive.yml lead with shell syntax runs through sh and a second hive lead adopts it", async () => {
+    const dir = freshProject("rex-sh-lead");
+    assert.equal((await runCli(["init", "--no-profile"], { cwd: dir, dataDir: dirs.dataDir, tmp: dirs.tmp, env: rexEnv })).code, 0);
+    const lead = "sleep 600 && true";
+    writeFileSync(join(dir, "hive.yml"), `lead: ${lead}\n`);
+    const { configHash } = await import("../dist/projectYml.js");
+    const project = projectOf(dir);
+    db.prepare("INSERT OR IGNORE INTO command_trust (project_id, name, config_hash) VALUES (?, 'lead', ?)").run(project.id, configHash("lead", lead, null, {}));
+    await startLead(dir);
+    const first = leadRow(db, project.id);
+    assert.deepEqual(fake.state().blocks[first.tmux_target].command.slice(-3), ["/bin/sh", "-c", lead]);
+    assert.equal(terminal.rowOwnership(first), "live");
+    await startLead(dir);
+    assert.equal(leadRow(db, project.id).tmux_target, first.tmux_target);
   });
 });
 

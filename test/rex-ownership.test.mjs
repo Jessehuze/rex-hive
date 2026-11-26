@@ -49,7 +49,7 @@ const doCalls = () => realCalls().filter((c) => c.argv.includes("do"));
 function newBlock(label, command = ["sleep", "600"]) {
   const made = rexApi(REX_ADDR, "session.create", {
     label: `s-${label}-${++seq}`,
-    initial_windows: [{ window_label: label, layout: { block: { flavor: "com.superlogical.terminal.shell", label, options: { shell: "none", command } } } }],
+    initial_windows: [{ window_label: label, layout: { block: { flavor: "com.superlogical.terminal.shell", label, options: { shell: "none", login: false, command } } } }],
   });
   const block = made.initial_windows[0].block_ids[0];
   return { session: made.session_id, window: made.initial_windows[0].window_id, block, pid: String(fake.state().blocks[block].child_pid) };

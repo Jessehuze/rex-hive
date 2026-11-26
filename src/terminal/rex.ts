@@ -11,6 +11,7 @@ import {
 } from "../rexCli.js";
 import {
   ENTER_DELAY_MS,
+  paneEnvPath,
   sessionName,
   findUnsafeControlChar,
   sleep,
@@ -484,8 +485,13 @@ export function programWords(words: string[]): string[] {
   return words.slice(i);
 }
 
-const commandHead = (command: string | null | undefined): string | null =>
-  programName(programWords(command?.trim().split(/\s+/) ?? [])[0]);
+function commandHeads(command: string | null | undefined): string[] {
+  const text = command?.trim() ?? "";
+  if (!text) return [];
+  const words = programWords(text.split(/\s+/));
+  const launched = programName(programWords(commandArgv(words.join(" ")))[0]);
+  return [...new Set([launched, programName(words[0])].filter((h): h is string => !!h))];
+}
 
 function usableSnapshot(snap: RexSnapshot | null | undefined, server: string, target: string): boolean {
   if (snap === undefined || (snap !== null && snap.server !== server)) return false;
@@ -518,9 +524,9 @@ export function rexOwnership(row: RowPaneIdentity & { command?: string | null },
   if (block.exited) return "gone";
   if (row.pane_pid === "" || block.pid === "") return "unknown";
   if (block.pid !== row.pane_pid) return "reissued";
-  const head = commandHead(rowCommand(row));
+  const heads = commandHeads(rowCommand(row));
   const programs = block.programs.filter((p) => p !== ENV_PROGRAM);
-  if (head !== null && programs.length > 0 && !programs.includes(head)) return "reissued";
+  if (heads.length > 0 && programs.length > 0 && !heads.some((h) => programs.includes(h))) return "reissued";
   return "live";
 }
 
@@ -657,14 +663,21 @@ export function shellWords(command: string): string[] | null {
   return words;
 }
 
+const SHELL_BUILTINS = new Set(["cd", "source", ".", "export", "set", "unset", "alias", "eval", "ulimit", "umask", "trap", "builtin", "command"]);
+export const REX_SHELL = "/bin/sh";
+
 export function commandArgv(command: string): string[] {
-  const words = shellWords(command);
-  if (words && words.length > 0 && !ENV_ASSIGNMENT.test(words[0])) return words;
-  return ["/bin/sh", "-c", command];
+  const parsed = shellWords(command);
+  const words = parsed?.[0] === "exec" ? parsed.slice(1) : parsed;
+  if (words && words.length > 0 && !ENV_ASSIGNMENT.test(words[0]) && !SHELL_BUILTINS.has(words[0])) return words;
+  return [REX_SHELL, "-c", command];
 }
 
+export const REX_ENV_PROGRAM = "/usr/bin/env";
+export const rexPanePath = (): string => paneEnvPath() ?? process.env.PATH ?? "";
+
 export function rexBlockCommand(env: Record<string, string>, argv: string[]): string[] {
-  return [ENV_PROGRAM, ...Object.entries(env).map(([k, v]) => `${k}=${v}`), ...argv];
+  return [REX_ENV_PROGRAM, `PATH=${rexPanePath()}`, ...Object.entries(env).map(([k, v]) => `${k}=${v}`), ...argv];
 }
 
 interface WindowHit {
@@ -788,6 +801,7 @@ export function rexCreatePane(spec: RexPaneSpec): RexPlaced {
       label: spec.label,
       options: {
         shell: "none",
+        login: false,
         command: rexBlockCommand(spec.env, spec.argv),
         cwd: spec.cwd,
         exit: { on_completion: !spec.retainOnExit },
@@ -815,7 +829,9 @@ export function rexCreatePane(spec: RexPaneSpec): RexPlaced {
   const target = reply.block_ids?.[0];
   if (!target) throw new RexError(`rex created no block for ${spec.label}`, "bad_output", "");
   writeKv(spec.projectId, REX_IN_USE_KEY, "1");
-  return { target, socket: rexSocketOf(server), pid: rexProbe(target, server).pid ?? "", window };
+  const probe = rexProbe(target, server);
+  if (probe.exited) quickExit(target, server);
+  return { target, socket: rexSocketOf(server), pid: probe.pid ?? "", window };
 }
 
 export class RexQuickExit extends Error {
@@ -828,15 +844,17 @@ export class RexQuickExit extends Error {
   }
 }
 
+function quickExit(target: string, server?: string): never {
+  const screen = guarded(() => rexCapture(target, 200, false, server).trim(), "");
+  rexClose(target, server);
+  throw new RexQuickExit(target, screen);
+}
+
 export function rexRefuseQuickExit(target: string, server?: string, windowMs = REX_QUICK_EXIT_MS): void {
   const deadline = Date.now() + windowMs;
   for (;;) {
     const probe = rexProbe(target, server);
-    if (probe.exited) {
-      const screen = guarded(() => rexCapture(target, 200, false, server).trim(), "");
-      rexClose(target, server);
-      throw new RexQuickExit(target, screen);
-    }
+    if (probe.exited) quickExit(target, server);
     if (probe.live === false) throw new RexQuickExit(target, "");
     if (Date.now() >= deadline) return;
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
