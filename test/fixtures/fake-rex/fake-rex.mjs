@@ -273,12 +273,63 @@ function leaves(node) {
   fail("bad_request", "layout node is neither block nor split");
 }
 
-function placeInLayer(state, block, window, layer, index) {
-  layer.blocks.splice(index ?? layer.blocks.length, 0, block.block_id);
-  block.window_id = window.window_id;
-  block.layer_id = layer.layer_id;
-  if (!window.focused_block_id) window.focused_block_id = block.block_id;
+const leafIds = (node) => (!node ? [] : node.block_id ? [node.block_id] : [...leafIds(node.split.before), ...leafIds(node.split.after)]);
+
+function syncLayer(state, window, layer) {
+  layer.blocks = leafIds(layer.tree);
+  for (const id of layer.blocks) {
+    state.blocks[id].window_id = window.window_id;
+    state.blocks[id].layer_id = layer.layer_id;
+  }
+  if (!window.focused_block_id && layer.blocks[0]) window.focused_block_id = layer.blocks[0];
 }
+
+const newSplit = (direction, ratio, before, after) => ({ split: { split_id: `split:${randomUUID()}`, direction, ratio: ratio ?? 0.5, before, after } });
+
+function buildTree(state, sessionId, node) {
+  if (!node) fail("bad_request", "layout is required");
+  if (node.block) return { block_id: createBlock(state, sessionId, node.block).block_id };
+  if (node.split) {
+    if (!["horizontal", "vertical"].includes(node.split.direction)) fail("bad_request", "direction is horizontal or vertical");
+    return newSplit(node.split.direction, node.split.ratio, buildTree(state, sessionId, node.split.before), buildTree(state, sessionId, node.split.after));
+  }
+  fail("bad_request", "layout node is neither block nor split");
+}
+
+function replaceNode(node, id, make) {
+  if (!node) return null;
+  if (node.block_id === id || node.split?.split_id === id) return make(node);
+  if (!node.split) return null;
+  for (const side of ["before", "after"]) {
+    const hit = replaceNode(node.split[side], id, make);
+    if (hit) {
+      node.split[side] = hit;
+      return node;
+    }
+  }
+  return null;
+}
+
+function insertBeside(layer, anchorId, inserted, direction, side, ratio) {
+  const make = (anchor) => (side === "before" ? newSplit(direction, ratio, inserted, anchor) : newSplit(direction, ratio, anchor, inserted));
+  const tree = replaceNode(layer.tree, anchorId, make);
+  if (!tree) fail("not_found", `anchor ${anchorId} is not in the layer`);
+  layer.tree = tree;
+}
+
+function removeLeaf(node, id) {
+  if (!node) return null;
+  if (node.block_id) return node.block_id === id ? null : node;
+  const before = removeLeaf(node.split.before, id);
+  const after = removeLeaf(node.split.after, id);
+  if (!before) return after;
+  if (!after) return before;
+  node.split.before = before;
+  node.split.after = after;
+  return node;
+}
+
+const tiledLayer = () => ({ layer_id: `layer:${randomUUID()}`, kind: "tiled", state: "normal", bounds: [0, 0, 1, 1], blocks: [], tree: null });
 
 function createWindow(state, session, label, layout) {
   const window = {
@@ -286,11 +337,12 @@ function createWindow(state, session, label, layout) {
     session_id: session.session_id,
     label: label ?? "",
     focused_block_id: null,
-    layers: [{ layer_id: `layer:${randomUUID()}`, kind: "tiled", state: "normal", bounds: [], blocks: [] }],
+    layers: [tiledLayer()],
   };
   state.windows.push(window);
-  const blocks = leaves(layout).map((spec) => createBlock(state, session.session_id, spec));
-  for (const block of blocks) placeInLayer(state, block, window, window.layers[0]);
+  window.layers[0].tree = buildTree(state, session.session_id, layout);
+  syncLayer(state, window, window.layers[0]);
+  const blocks = window.layers[0].blocks.map((id) => state.blocks[id]);
   if (!session.active_window_id) session.active_window_id = window.window_id;
   return { window, blocks };
 }
@@ -300,7 +352,10 @@ function removeFromWindow(state, block, { closeEmpty = true } = {}) {
   block.window_id = null;
   block.layer_id = null;
   if (!window) return;
-  for (const layer of window.layers) layer.blocks = layer.blocks.filter((id) => id !== block.block_id);
+  for (const layer of window.layers) {
+    layer.tree = removeLeaf(layer.tree, block.block_id);
+    layer.blocks = leafIds(layer.tree);
+  }
   window.layers = window.layers.filter((l) => l.kind === "tiled" || l.blocks.length > 0);
   if (window.focused_block_id === block.block_id) window.focused_block_id = window.layers.flatMap((l) => l.blocks)[0] ?? null;
   if (closeEmpty && window.layers.every((l) => l.blocks.length === 0)) {
@@ -310,6 +365,43 @@ function removeFromWindow(state, block, { closeEmpty = true } = {}) {
       session.active_window_id = state.windows.find((w) => w.session_id === session.session_id)?.window_id ?? null;
     }
   }
+}
+
+function checkBounds(bounds) {
+  const rect = Array.isArray(bounds) ? bounds : bounds && typeof bounds === "object" ? [bounds.x, bounds.y, bounds.w, bounds.h] : null;
+  if (!rect || rect.length !== 4 || rect.some((n) => typeof n !== "number" || !Number.isFinite(n))) fail("bad_request", "bounds is [x, y, w, h]");
+  const [x, y, w, h] = rect;
+  if (w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > 1 + 1e-9 || y + h > 1 + 1e-9) fail("bad_request", "bounds must fit inside the window");
+  return rect;
+}
+
+function layerOf(state, sessionId, layerId) {
+  const found = state.windows.filter((w) => w.session_id === sessionId).flatMap((w) => w.layers.map((l) => ({ window: w, layer: l }))).find((x) => x.layer.layer_id === layerId);
+  if (!found) fail("not_found", `layer ${layerId} is not in the session`);
+  return found;
+}
+
+function contains(node, id) {
+  return leafIds(node).includes(id);
+}
+
+function innermostSplit(node, direction, before, after) {
+  if (!node?.split) return null;
+  for (const side of ["before", "after"]) {
+    const inner = innermostSplit(node.split[side], direction, before, after);
+    if (inner) return inner;
+  }
+  return node.split.direction === direction && contains(node.split.before, before) && contains(node.split.after, after) ? node.split : null;
+}
+
+function viewLayout(node, rect) {
+  if (!node) return null;
+  if (node.block_id) return { rect, block_id: node.block_id };
+  const { split_id, direction, ratio, before, after } = node.split;
+  const [x, y, w, h] = rect;
+  const first = direction === "horizontal" ? [x, y, w * ratio, h] : [x, y, w, h * ratio];
+  const second = direction === "horizontal" ? [x + w * ratio, y, w * (1 - ratio), h] : [x, y + h * ratio, w, h * (1 - ratio)];
+  return { rect, split: { split_id, direction, ratio, before: viewLayout(before, first), after: viewLayout(after, second) } };
 }
 
 function closeBlock(state, block) {
@@ -452,9 +544,9 @@ function viewOf(state, session) {
         layers: w.layers.map((l) => ({
           layer_id: l.layer_id,
           kind: l.kind,
-          state: l.state,
           bounds: l.bounds,
-          layout: null,
+          layout: viewLayout(l.tree, l.bounds),
+          ...(l.state === "minimized" ? { state: "minimized" } : {}),
           blocks: l.blocks.map((id) => {
             const b = state.blocks[id];
             return { block_id: id, label: b.label, flavor: b.flavor, creator_name: TERMINAL, host_id: "fake-host", owner: null };
@@ -509,6 +601,20 @@ const SCHEMAS = {
   "session.set_block_label": { keys: ["block_id", "label", "session_id"], required: ["session_id", "block_id"] },
   "session.set_window_label": { keys: ["label", "session_id", "window_id"], required: ["session_id", "window_id"] },
   "target.resolve": { keys: ["context", "kinds", "queries", "scope"], required: ["kinds", "queries"] },
+  "session.move_block": { keys: ["anchor_block_id", "block_id", "direction", "ratio", "session_id", "side"], required: ["session_id", "block_id", "anchor_block_id"] },
+  "session.float_block": { keys: ["block_id", "bounds", "session_id"], required: ["session_id", "block_id", "bounds"] },
+  "session.set_layer_state": { keys: ["focus", "layer_id", "session_id", "state"], required: ["session_id", "layer_id", "state"] },
+  "session.resize_layer": { keys: ["bounds", "layer_id", "session_id"], required: ["session_id", "layer_id", "bounds"] },
+  "session.detach_block": { keys: ["block_id", "session_id"], required: ["session_id", "block_id"] },
+  "session.resize_pane": { keys: ["after_block_id", "before_block_id", "direction", "ratio", "session_id"], required: ["session_id", "direction", "before_block_id", "after_block_id", "ratio"] },
+  "session.view": { keys: ["session_id"], required: ["session_id"] },
+};
+
+const checkRatio = (ratio) => {
+  if (ratio !== undefined && !(typeof ratio === "number" && ratio > 0 && ratio < 1)) fail("bad_request", "ratio is between 0 and 1");
+};
+const checkEnum = (value, allowed, name) => {
+  if (value !== undefined && value !== null && !allowed.includes(value)) fail("bad_request", `${name} is ${allowed.join(" or ")}`);
 };
 
 function checkSchema(method, params) {
@@ -555,26 +661,34 @@ function apiCall(state, method, params) {
     case "session.new_split": {
       const session = requireSession(state, params.session_id);
       if (params.anchor_id && params.window_id) fail("bad_request", "send anchor_id or window_id, not both");
+      checkRatio(params.ratio);
       let window;
       let layer;
-      let index;
       let anchorId = params.anchor_id ?? null;
       if (anchorId) {
         const anchor = state.blocks[anchorId];
-        if (!anchor || anchor.session_id !== session.session_id) fail("not_found", `anchor ${anchorId} is not in the session`);
-        ({ window, layer } = anchorWindow(state, anchor));
-        index = layer.blocks.indexOf(anchorId) + (params.side === "before" ? 0 : 1);
+        if (anchor) {
+          if (anchor.session_id !== session.session_id) fail("not_found", `anchor ${anchorId} is not in the session`);
+          ({ window, layer } = anchorWindow(state, anchor));
+        } else {
+          const hit = state.windows.filter((w) => w.session_id === session.session_id).flatMap((w) => w.layers.map((l) => ({ window: w, layer: l }))).find((x) => replaceNode(structuredClone(x.layer.tree), anchorId, (n) => n));
+          if (!hit) fail("not_found", `anchor ${anchorId} is not in the session`);
+          ({ window, layer } = hit);
+        }
       } else {
         window = params.window_id ? windowById(state, params.window_id) : windowById(state, session.active_window_id);
         if (params.window_id && (!window || window.session_id !== session.session_id)) fail("not_found", `window ${params.window_id} is not in the session`);
         if (!window) fail("conflict", "the session has no windows");
         layer = window.layers[0];
-        anchorId = window.focused_block_id;
+        anchorId = window.focused_block_id && window.layers[0].blocks.includes(window.focused_block_id) ? window.focused_block_id : window.layers[0].blocks[0];
       }
-      const blocks = leaves(params.layout).map((spec) => createBlock(state, session.session_id, spec));
-      blocks.forEach((b, i) => placeInLayer(state, b, window, layer, index === undefined ? undefined : index + i));
-      if (params.focus && blocks[0]) window.focused_block_id = blocks[0].block_id;
-      return { anchor_id: anchorId, block_ids: blocks.map((b) => b.block_id), split_ids: blocks.map(() => `split:${randomUUID()}`), revision: nextRevision(state) };
+      const inserted = buildTree(state, session.session_id, params.layout);
+      if (anchorId) insertBeside(layer, anchorId, inserted, params.direction, params.side, params.ratio);
+      else layer.tree = inserted;
+      syncLayer(state, window, layer);
+      const blocks = leafIds(inserted);
+      if (params.focus && blocks[0]) window.focused_block_id = blocks[0];
+      return { anchor_id: anchorId, block_ids: blocks, split_ids: blocks.map(() => `split:${randomUUID()}`), revision: nextRevision(state) };
     }
     case "session.new_block": {
       requireSession(state, params.session_id);
@@ -582,28 +696,50 @@ function apiCall(state, method, params) {
       return { block_id: block.block_id, revision: nextRevision(state) };
     }
     case "session.move_block": {
+      checkRatio(params.ratio);
+      checkEnum(params.direction, ["horizontal", "vertical"], "direction");
+      checkEnum(params.side, ["before", "after"], "side");
+      if (params.block_id === params.anchor_block_id) fail("bad_request", "block_id and anchor_block_id are the same");
       const block = requireBlock(state, params);
       const anchor = requireBlock(state, { session_id: params.session_id, block_id: params.anchor_block_id });
       anchorWindow(state, anchor);
       removeFromWindow(state, block);
       const { window, layer } = anchorWindow(state, anchor);
-      placeInLayer(state, block, window, layer, layer.blocks.indexOf(anchor.block_id) + (params.side === "before" ? 0 : 1));
+      insertBeside(layer, anchor.block_id, { block_id: block.block_id }, params.direction ?? "horizontal", params.side ?? "after", params.ratio);
+      syncLayer(state, window, layer);
       return { created_split_id: `split:${randomUUID()}`, removed_split_id: null, revision: nextRevision(state) };
     }
     case "session.float_block": {
       const block = requireBlock(state, params);
-      const { window } = anchorWindow(state, block);
+      const rect = checkBounds(params.bounds);
+      const { window, layer: from } = anchorWindow(state, block);
+      if (from.kind !== "tiled") fail("bad_request", `block ${block.block_id} is already in a floating layer`);
       removeFromWindow(state, block, { closeEmpty: false });
-      const layer = { layer_id: `layer:${randomUUID()}`, kind: "floating", state: "normal", bounds: params.bounds ?? [], blocks: [] };
+      const layer = { layer_id: `layer:${randomUUID()}`, kind: "floating", state: "normal", bounds: rect, blocks: [], tree: { block_id: block.block_id } };
       window.layers.push(layer);
-      placeInLayer(state, block, window, layer);
+      syncLayer(state, window, layer);
       return { layer_id: layer.layer_id, revision: nextRevision(state) };
     }
     case "session.set_layer_state": {
       requireSession(state, params.session_id);
-      const layer = state.windows.filter((w) => w.session_id === params.session_id).flatMap((w) => w.layers).find((l) => l.layer_id === params.layer_id);
-      if (!layer) fail("not_found", `layer ${params.layer_id} is not in the session`);
+      checkEnum(params.state, ["normal", "minimized"], "state");
+      const { window, layer } = layerOf(state, params.session_id, params.layer_id);
+      if (params.state === "minimized" && layer.kind === "tiled") fail("bad_request", "the window's layout cannot be minimized");
+      if (params.focus && (params.state === "minimized" || layer.blocks.length === 0)) fail("bad_request", "focus needs a normal layer with a block");
+      if (params.state === "minimized" && !window.layers.some((l) => l !== layer && l.state !== "minimized" && l.blocks.length > 0)) fail("bad_request", "a window must keep a visible pane");
       layer.state = params.state;
+      if (params.focus) {
+        window.focused_block_id = layer.blocks[0];
+        sessionById(state, params.session_id).active_window_id = window.window_id;
+      }
+      return { revision: nextRevision(state) };
+    }
+    case "session.resize_layer": {
+      requireSession(state, params.session_id);
+      const rect = checkBounds(params.bounds);
+      const { layer } = layerOf(state, params.session_id, params.layer_id);
+      if (layer.kind === "tiled") fail("bad_request", "the window's layout is not a floating layer");
+      layer.bounds = rect;
       return { revision: nextRevision(state) };
     }
     case "session.detach_block":
@@ -626,10 +762,20 @@ function apiCall(state, method, params) {
       sessionById(state, params.session_id).active_window_id = window.window_id;
       return { revision: nextRevision(state) };
     }
-    case "session.resize_pane":
-      requireBlock(state, { session_id: params.session_id, block_id: params.before_block_id });
-      requireBlock(state, { session_id: params.session_id, block_id: params.after_block_id });
+    case "session.resize_pane": {
+      checkEnum(params.direction, ["horizontal", "vertical"], "direction");
+      if (!(typeof params.ratio === "number" && params.ratio > 0 && params.ratio < 1)) fail("bad_request", "ratio is between 0 and 1");
+      if (params.before_block_id === params.after_block_id) fail("bad_request", "the two blocks are the same");
+      const before = requireBlock(state, { session_id: params.session_id, block_id: params.before_block_id });
+      const after = requireBlock(state, { session_id: params.session_id, block_id: params.after_block_id });
+      if (!before.window_id || !after.window_id) fail("not_found", "both blocks must be in a window");
+      if (before.layer_id !== after.layer_id) fail("bad_request", "the blocks are in different windows or layers");
+      const { layer } = anchorWindow(state, before);
+      const split = innermostSplit(layer.tree, params.direction, before.block_id, after.block_id);
+      if (!split) fail("bad_request", "no split between the blocks matches");
+      split.ratio = params.ratio;
       return { revision: nextRevision(state) };
+    }
     case "target.resolve":
       if (!params.queries?.length) fail("bad_request", "send at least one query");
       return resolveTargets(state, params);

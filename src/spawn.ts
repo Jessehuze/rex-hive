@@ -42,7 +42,7 @@ import {
   waitForPaneEstablished,
   rowOwnership,
 } from "./terminal.js";
-import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexRefuseQuickExit, startProcess as refuseRexProcess } from "./terminal/rex.js";
+import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexRefuseQuickExit } from "./terminal/rex.js";
 
 export function withWindowClaim<T>(claim: () => T): T {
   if (db.inTransaction) {
@@ -276,7 +276,6 @@ function placeRexPane(
   envFlags: string[],
   commandString: string,
 ): PlacedPane {
-  if (spec.placement === "processes") refuseRexProcess();
   const placed = withWindowClaim(() => rexCreatePane({
     projectId: spec.projectId,
     projectName: spec.projectName,
@@ -284,11 +283,11 @@ function placeRexPane(
     cwd: spec.cwd,
     env: envFromFlags(envFlags),
     argv: commandArgv(commandString),
-    placement: spec.placement === "window" ? "window" : "split",
+    placement: spec.placement === "processes" ? "hidden" : spec.placement,
     beside: lead.tmux_target,
     retainOnExit: spec.retainOnExit ?? false,
   }));
-  return { target: placed.target, pid: placed.pid, socket: placed.socket, landedInProjectId: null, layoutApplied: false, inProcessesWindow: false };
+  return { target: placed.target, pid: placed.pid, socket: placed.socket, landedInProjectId: null, layoutApplied: false, inProcessesWindow: spec.placement === "processes" };
 }
 
 function placeAgentPane(

@@ -148,7 +148,7 @@ import {
   rowAliveProbe,
   rowLiveProbe,
   rowOwnership,
-  sendText, terminalOfRow,
+  sendText, terminalOfRow, reapExitedBlock,
 } from "./terminal.js";
 import {
   appendTeardown,
@@ -534,6 +534,7 @@ export function janitor(snapshot: AliveSnapshot | null = liveTargets()): {
       if (closed) {
         closedAgents += 1;
         swept.push(agent);
+        reapExitedBlock(agent, snapshot);
       }
     }
   }
