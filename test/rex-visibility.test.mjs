@@ -135,7 +135,7 @@ describe("worker visibility on tmux", () => {
     assert.deepEqual(realCalls().slice(before), [], "a tmux worker's refusal makes no rex call");
     db.prepare("UPDATE agents SET status = 'closed' WHERE project_id = ?").run(project.id);
   });
-  it("workers: hidden under tmux notes once that it needs Rex and starts workers shown", { skip: hasTmux ? false : "tmux is not installed" }, async () => {
+  it("workers: hidden under tmux notes once, on the first successful spawn, that it needs Rex and starts workers shown", { skip: hasTmux ? false : "tmux is not installed" }, async () => {
     const dir = freshProject("vis-tmux-spawn", "workers: hidden\n");
     const plainData = mkdtempSync(join(dirs.tmp, "plain-data-"));
     assert.equal((await runCli(["init", "--no-profile"], { cwd: dir, dataDir: plainData, tmp: dirs.tmp, env: rexEnv })).code, 0);
@@ -143,6 +143,7 @@ describe("worker visibility on tmux", () => {
     const mcp = new McpClient({ cwd: dir, dataDir: plainData, env: withClaude({ HIVE_SPAWN_READY_MS: "300" }) });
     await mcp.start();
     try {
+      await assert.rejects(mcp.call("agent_spawn", { name: "t-fails", command: "/usr/bin/false", placement: "window" }));
       const first = await mcp.call("agent_spawn", { name: "t-one", command: fakeClaude("sleep 600"), placement: "window" });
       const second = await mcp.call("agent_spawn", { name: "t-two", command: fakeClaude("sleep 600"), placement: "window" });
       assert.match(first.tmux_target, /^%\d+$/);
@@ -389,3 +390,66 @@ describe("worker visibility on Rex", () => {
   });
 });
 
+
+const shownAsRow = (projectId, block) =>
+  db.prepare("SELECT value FROM kv WHERE project_id = ? AND key = ?").get(projectId, `terminal:rex:shown-as:${block}`)?.value;
+
+describe("hidden workers across every launch and retirement path", () => {
+  it("agent_close and agent_park of a hidden worker delete its remembered show placement", async () => {
+    const dir = freshProject("vis-retire");
+    const { project, mcp } = await startLead(dir);
+    writeFileSync(join(dir, "hive.yml"), "workers: hidden\n");
+    const closing = await spawn(mcp, "w-closing", { placement: "split" });
+    const parking = await spawn(mcp, "w-parking", { placement: "split" });
+    const control = await spawn(mcp, "w-control", { placement: "split" });
+    for (const w of [closing, parking, control]) assert.equal(shownAsRow(project.id, w.tmux_target), "split", "the fixture remembers each hidden worker");
+    await mcp.call("agent_close", { name: "w-closing" });
+    await mcp.call("agent_park", { name: "w-parking" });
+    assert.equal(workerRow(project.id, "w-closing").status, "closed");
+    assert.ok(workerRow(project.id, "w-parking").parked_at, "the worker was parked");
+    assert.equal(shownAsRow(project.id, closing.tmux_target), undefined, "agent_close deletes it");
+    assert.equal(shownAsRow(project.id, parking.tmux_target), undefined, "agent_park deletes it");
+    assert.equal(shownAsRow(project.id, control.tmux_target), "split", "a running worker keeps it");
+  });
+
+  it("agent_fork and agent_resume start a worker hidden under workers: hidden", async () => {
+    const dir = freshProject("vis-fork-resume");
+    const { project, lead, mcp } = await startLead(dir);
+    const source = await spawn(mcp, "w-src", { placement: "split" });
+    assertInLeadSplit(source.tmux_target, lead.tmux_target);
+    const transcript = join(dir, "source-transcript.jsonl");
+    writeFileSync(transcript, "{}\n");
+    db.prepare("UPDATE agents SET transcript_path = ? WHERE id = ?").run(transcript, source.agent_id);
+    writeFileSync(join(dir, "hive.yml"), "workers: hidden\n");
+    const forked = await mcp.call("agent_fork", { agent_id: source.agent_id, name: "w-fork" });
+    assertHiddenInLeadTab(forked.tmux_target, lead.tmux_target);
+    await mcp.call("agent_close", { name: "w-src" });
+    const resumed = await mcp.call("agent_resume", { name: "w-src" });
+    assert.notEqual(resumed.tmux_target, source.tmux_target, "the resume made a new block");
+    assertHiddenInLeadTab(resumed.tmux_target, lead.tmux_target);
+    assert.equal(workerRow(project.id, "w-src").status, "running");
+  });
+
+  it("hide --all reports a worker whose rex call fails and still hides the rest", async () => {
+    const dir = freshProject("vis-all-fail");
+    const { mcp } = await startLead(dir);
+    await spawn(mcp, "w-f1", { placement: "split" });
+    await spawn(mcp, "w-f2", { placement: "split" });
+    const before = realCalls().length;
+    const result = await cli(["hide", "--all"], dir, { FAKE_REX_FAIL_ON: "session.resize_layer" });
+    assert.equal(result.code, 1, result.stdout + result.stderr);
+    assert.match(result.stdout, /w-f1: .*injected failure on session\.resize_layer/);
+    assert.match(result.stdout, /w-f2: .*injected failure on session\.resize_layer/);
+    assert.equal(methods(apiCalls(before)).filter((m) => m === "session.float_block").length, 2, "the second worker is still attempted after the first fails");
+  });
+
+  it("a worker spawned hidden with placement window gets no 'got its own window' note on Rex", async () => {
+    const dir = freshProject("vis-note");
+    const { mcp } = await startLead(dir);
+    const shown = await spawn(mcp, "w-shown-tab", { placement: "window" });
+    assert.match(shown.note ?? "", /got its own window/, "the control: a shown window worker under a split config gets the note");
+    writeFileSync(join(dir, "hive.yml"), "workers: hidden\n");
+    const hidden = await spawn(mcp, "w-hidden-tab", { placement: "window" });
+    assert.doesNotMatch(hidden.note ?? "", /got its own window/);
+  });
+});

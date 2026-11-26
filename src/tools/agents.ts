@@ -786,10 +786,6 @@ export function registerAgents(server: McpServer): void {
           ? 'This worker got its own window because per-call placement "window" overrides this project\'s split config; run `hive layout` to gather it.'
           : undefined;
         const layout = args.layout ?? projectConfig?.layout ?? DEFAULT_LAYOUT;
-        const wantsHidden = projectConfig?.workers === "hidden";
-        const onRex = wantsHidden && rexLeadFor(project.id, parent) !== null;
-        const hiddenNote = wantsHidden && !onRex && !hiddenWorkersWarned.has(project.id) ? HIDDEN_WORKERS_NEED_REX : undefined;
-        if (hiddenNote) hiddenWorkersWarned.add(project.id);
 
         let spawned;
         try {
@@ -803,7 +799,6 @@ export function registerAgents(server: McpServer): void {
             cwd,
             env: workerPaneEnvironment(projectConfig, harness, codexHomeKey ? codexHomeDir(codexHomeKey) : null),
             placement,
-            hidden: onRex,
             layout,
             parentActor: parent,
             sessionId,
@@ -919,11 +914,13 @@ export function registerAgents(server: McpServer): void {
           const existingNote = typeof receipt.note === "string" ? receipt.note : "";
           receipt.note = existingNote ? `${existingNote} ${omittedTodoWarning}` : omittedTodoWarning;
         }
-        for (const extra of [placementNote, hiddenNote]) {
+        const hiddenNote = spawned.hidden === "tmux" && !hiddenWorkersWarned.has(project.id) ? HIDDEN_WORKERS_NEED_REX : undefined;
+        for (const extra of [spawned.hidden === "rex" ? undefined : placementNote, hiddenNote]) {
           if (!extra) continue;
           const existingNote = typeof receipt.note === "string" ? receipt.note : "";
           receipt.note = existingNote ? `${existingNote} ${extra}` : extra;
         }
+        if (hiddenNote) hiddenWorkersWarned.add(project.id);
         return receipt;
       }),
   );

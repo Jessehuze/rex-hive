@@ -2026,7 +2026,12 @@ function visibilityCommand(argv: string[], verb: "show" | "hide"): VisibilityHit
     const target = liveWorkerTarget(row);
     if (!target) continue;
     const hit = { project, name: row.name, config, target, worker: true };
-    console.log(verb === "show" ? showWorker(hit) : hideWorker(hit));
+    try {
+      console.log(verb === "show" ? showWorker(hit) : hideWorker(hit));
+    } catch (e) {
+      console.log(`${row.name}: ${errorMessage(e)}`);
+      process.exitCode = 1;
+    }
   }
   return null;
 }
