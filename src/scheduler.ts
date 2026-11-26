@@ -529,7 +529,7 @@ export function janitor(snapshot: AliveSnapshot | null = liveTargets()): {
       const closed = agent.kind === "agent"
         ? agent.recovery_state === "excluded"
           ? closeAgentRow(agent.id, identity)
-          : snapshot?.serverAnswered === true
+          : snapshot?.serverAnswered === true || terminalOfRow(agent) === "rex" // Rex reads dead only on an answer or an expired grace
             ? markWorkerLost(agent.id, identity)
             : closeAgentRow(agent.id, identity)
         : closeAgentRow(agent.id, identity);
