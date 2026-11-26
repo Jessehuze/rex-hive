@@ -22,7 +22,7 @@ import {
   type RowOwnership, type WindowLayout,
   type RowPaneIdentity,
 } from "./tmux.js"; import {
-  applyLayout, callerTmuxSocket, isRexTarget, terminalOfRow,
+  applyLayout, callerTmuxSocket, isRexSocket, isRexTarget, rexServerOf, terminalOfRow,
   claimInitialWindow, createWindow,
   ensureSession, crossServerRefusal,
   findProcessesWindow, findProjectWindow,
@@ -42,7 +42,7 @@ import {
   waitForPaneEstablished,
   rowOwnership,
 } from "./terminal.js";
-import { commandArgv, envFromFlags, rexCreatePane, rexRefuseQuickExit, startProcess as refuseRexProcess } from "./terminal/rex.js";
+import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexRefuseQuickExit, startProcess as refuseRexProcess } from "./terminal/rex.js";
 
 export function withWindowClaim<T>(claim: () => T): T {
   if (db.inTransaction) {
@@ -150,8 +150,8 @@ function recordPane(agentId: number, target: string, socket: string, pid: string
 
 // The creation pid proves the pane existed, not that its process still runs. A retained pane is
 // left to the caller's readiness wait, which reports the exit with its tail.
-function refuseIfExitedImmediately(target: string, retained: boolean): void {
-  if (isRexTarget(target)) return retained ? undefined : rexRefuseQuickExit(target);
+function refuseIfExitedImmediately(target: string, retained: boolean, socket?: string): void {
+  if (isRexTarget(target)) return retained ? undefined : rexRefuseQuickExit(target, rexServerFrom(socket));
   if (retained || paneProcessExited(target) !== true) return;
   discardOrphanedPane(target);
   throw new Error(
@@ -160,9 +160,15 @@ function refuseIfExitedImmediately(target: string, retained: boolean): void {
   );
 }
 
-export function createdPidOrDiscard(target: string, pid: string): string {
+export function createdPidOrDiscard(target: string, pid: string, socket?: string): string {
   if (/^\d+$/.test(pid)) return pid;
-  discardOrphanedPane(target);
+  discardOrphanedPane(target, socket);
+  if (isRexTarget(target)) {
+    throw new Error(
+      `Rex did not report a process id for the new block ${target} when it created it, so it was closed rather ` +
+        "than recorded: a row with no pid can never be verified as owning its block. Retry.",
+    );
+  }
   throw new Error(
     `tmux did not report a process id for the new pane ${target} when it created it, so it was discarded rather ` +
       "than recorded: a row with no pane pid can never be verified as owning its pane. Retry.",
@@ -195,7 +201,15 @@ export function killAgentPaneWithoutRelayout(target: string): void {
   if (isPaneTarget(target)) killPane(target); else killWindow(target);
 }
 
-export function discardOrphanedPane(target: string): void {
+const rexServerFrom = (socket?: string): string | undefined => (socket && isRexSocket(socket) ? rexServerOf(socket) : undefined);
+
+export function discardOrphanedPane(target: string, socket?: string): void {
+  if (isRexTarget(target) && rexServerFrom(socket)) {
+    try {
+      rexClose(target, rexServerFrom(socket));
+    } catch {}
+    return;
+  }
   try {
     waitForPaneEstablished(target);
     killPane(target);
@@ -435,12 +449,12 @@ export function launchAgent(spec: LaunchSpec): {
       retainedWindow = window;
     });
     const { target, landedInProjectId, layoutApplied, inProcessesWindow } = placed;
-    const pid = createdPidOrDiscard(target, placed.pid);
-    refuseIfExitedImmediately(target, spec.retainOnExit ?? false);
+    const pid = createdPidOrDiscard(target, placed.pid, placed.socket);
+    refuseIfExitedImmediately(target, spec.retainOnExit ?? false, placed.socket);
     paneUp = true;
 
     if (!recordPane(agentId, target, placed.socket ?? socket, pid)) {
-      discardOrphanedPane(target);
+      discardOrphanedPane(target, placed.socket);
       throw paneRacedRetirement(agentId);
     }
     return { agentId, actorId, target, landedInProjectId, layoutApplied, inProcessesWindow, retainedWindow };
@@ -559,12 +573,12 @@ export function resumeAgent(
     const title = windowTitle(spec.projectName, spec.name);
     const placed = placeAgentPane(session, spec, envFlags, spec.commandString, title);
     const { target, landedInProjectId } = placed;
-    const pid = createdPidOrDiscard(target, placed.pid);
-    refuseIfExitedImmediately(target, false);
+    const pid = createdPidOrDiscard(target, placed.pid, placed.socket);
+    refuseIfExitedImmediately(target, false, placed.socket);
     paneUp = true;
 
     if (!recordPane(spec.agentId, target, placed.socket ?? socket, pid)) {
-      discardOrphanedPane(target);
+      discardOrphanedPane(target, placed.socket);
       throw paneRacedRetirement(spec.agentId);
     }
     return { target, landedInProjectId };

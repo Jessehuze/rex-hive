@@ -193,7 +193,7 @@ import {
   resolveInTmuxTarget,
   rowLive,
   resolveTerminal,
-  rowOwnership, terminalOfRow,
+  rowOwnership, terminalOfRow, isRexTarget, rexServerOf,
   serverEnvironment,
   sessionClients,
   setPaneTitle,
@@ -205,7 +205,7 @@ import {
   waitForPaneEstablished,
   windowLayout,
 } from "./terminal.js";
-import { commandArgv, envFromFlags, rexCreatePane, rexRefuseQuickExit, rexRefusal } from "./terminal/rex.js";
+import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexRefuseQuickExit, rexRefusal } from "./terminal/rex.js";
 import { collectCrew, crewStoreProblem } from "./crew.js";
 import { resumeWorker, validateResumeWorker } from "./agentResume.js";
 import { markWorkerLost } from "./workerRecovery.js";
@@ -749,16 +749,21 @@ function leadTerminal(previous: RowPaneIdentity, config: { terminal: Terminal | 
   return resolveTerminalAndWarn(config).terminal;
 }
 
-function rexLeadPane(project: Project, previous: RowPaneIdentity, envFlags: string[], launchCommand: string) {
+function rexLeadPane(project: Project, previous: RowPaneIdentity, envFlags: string[], launchCommand: string, codexHomeKey?: string) {
   if (terminalOfRow(previous) === "rex" && rowOwnership(previous) === "live") {
-    return { leadPane: previous.tmux_target, leadWindow: "", createdPane: false, leadSocket: previous.tmux_socket };
+    return { leadPane: previous.tmux_target, leadWindow: "", createdPane: false, leadSocket: previous.tmux_socket, leadPid: "" };
   }
-  const placed = withWindowClaim(() => rexCreatePane({
-    projectId: project.id, projectName: project.name, label: `${project.name}/lead`, cwd: project.path,
-    env: envFromFlags(envFlags), argv: commandArgv(launchCommand), placement: "lead", retainOnExit: false,
-  }));
-  rexRefuseQuickExit(placed.target, placed.socket.slice("rex:".length));
-  return { leadPane: placed.target, leadWindow: placed.window, createdPane: true, leadSocket: placed.socket };
+  try {
+    const placed = withWindowClaim(() => rexCreatePane({
+      projectId: project.id, projectName: project.name, label: `${project.name}/lead`, cwd: project.path,
+      env: envFromFlags(envFlags), argv: commandArgv(launchCommand), placement: "lead", retainOnExit: false,
+    }));
+    rexRefuseQuickExit(placed.target, rexServerOf(placed.socket));
+    return { leadPane: placed.target, leadWindow: placed.window, createdPane: true, leadSocket: placed.socket, leadPid: placed.pid };
+  } catch (e) {
+    if (codexHomeKey) reapCodexHome(codexHomeKey);
+    throw e;
+  }
 }
 
 function unregisteredLeadRoot(path?: string): string | null {
@@ -940,7 +945,7 @@ async function cmdLead(argv: string[]): Promise<void> {
 
     const launchCommand = leadCommand + promptSuffix;
     const terminal = leadTerminal(previousIdentity, config);
-    const { leadPane, leadWindow, createdPane, leadSocket } = terminal === "rex" ? rexLeadPane(project, previousIdentity, envFlags, launchCommand) : { leadSocket: callerTmuxSocket(), ...withWindowClaim(() => {
+    const { leadPane, leadWindow, createdPane, leadSocket, leadPid } = terminal === "rex" ? rexLeadPane(project, previousIdentity, envFlags, launchCommand, newCodexHomeKey) : { leadSocket: callerTmuxSocket(), leadPid: "", ...withWindowClaim(() => {
       let leadPane: string;
       let leadWindow: string;
       let createdPane: boolean;
@@ -1015,8 +1020,9 @@ async function cmdLead(argv: string[]): Promise<void> {
     const abandonClaim = () => {
       if (createdPane) {
         try {
-          waitForPaneEstablished(leadPane);
-          killPane(leadPane);
+          if (isRexTarget(leadPane)) rexClose(leadPane, rexServerOf(leadSocket));
+          else waitForPaneEstablished(leadPane);
+          if (!isRexTarget(leadPane)) killPane(leadPane);
         } catch {
 
         }
@@ -1030,9 +1036,15 @@ async function cmdLead(argv: string[]): Promise<void> {
           "or could not be verified), so nothing was recorded. Re-run `hive lead`; it will start a fresh pane.",
       );
     }
-    const recordedPanePid = createdPane ? panePidForRecord(leadPane) : previousPanePid;
+    const recordedPanePid = createdPane ? leadPid || panePidForRecord(leadPane) : previousPanePid;
     if (recordedPanePid === "") {
       abandonClaim();
+      if (isRexTarget(leadPane)) {
+        throw new Error(
+          `Rex did not report a process id for the new lead block ${leadPane}, so it was closed rather than recorded: ` +
+            "a lead row with no pid can never be verified as owning its block. Re-run `hive lead`.",
+        );
+      }
       throw new Error(
         `tmux did not report a process id for the new lead pane ${leadPane} (asked twice), so it was discarded ` +
           "rather than recorded: a lead row with no pane pid can never be verified as owning its pane. Re-run `hive lead`.",

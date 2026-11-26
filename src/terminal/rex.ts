@@ -40,6 +40,7 @@ export const respawnLead = (): never => refuse("lead handoff");
 export const floatHidden = (): never => refuse("hidden workers");
 
 export interface RexStore {
+  inTransaction?: boolean;
   prepare(sql: string): { all(...params: unknown[]): unknown[]; get(...params: unknown[]): unknown; run(...params: unknown[]): unknown };
 }
 
@@ -485,12 +486,21 @@ export function programWords(words: string[]): string[] {
   return words.slice(i);
 }
 
+const withoutAssignments = (words: string[]): string[] => {
+  const rest = programWords(words);
+  let i = 0;
+  while (i < rest.length && ENV_ASSIGNMENT.test(rest[i])) i++;
+  return rest[i] === "exec" ? rest.slice(i + 1) : rest.slice(i);
+};
+
+const firstProgram = (segment: string): string | null => programName(withoutAssignments(segment.trim().split(/\s+/))[0]);
+
 function commandHeads(command: string | null | undefined): string[] {
   const text = command?.trim() ?? "";
   if (!text) return [];
-  const words = programWords(text.split(/\s+/));
-  const launched = programName(programWords(commandArgv(words.join(" ")))[0]);
-  return [...new Set([launched, programName(words[0])].filter((h): h is string => !!h))];
+  const launched = programName(programWords(commandArgv(text))[0]);
+  const segments = text.split(/&&|\|\||;/);
+  return [...new Set([launched, firstProgram(text), firstProgram(segments[segments.length - 1])].filter((h): h is string => !!h))];
 }
 
 function usableSnapshot(snap: RexSnapshot | null | undefined, server: string, target: string): boolean {
@@ -669,7 +679,7 @@ export const REX_SHELL = "/bin/sh";
 export function commandArgv(command: string): string[] {
   const parsed = shellWords(command);
   const words = parsed?.[0] === "exec" ? parsed.slice(1) : parsed;
-  if (words && words.length > 0 && !ENV_ASSIGNMENT.test(words[0]) && !SHELL_BUILTINS.has(words[0])) return words;
+  if (words && words.length > 0 && !words[0].includes("=") && !SHELL_BUILTINS.has(words[0])) return words;
   return [REX_SHELL, "-c", command];
 }
 
@@ -677,7 +687,8 @@ export const REX_ENV_PROGRAM = "/usr/bin/env";
 export const rexPanePath = (): string => paneEnvPath() ?? process.env.PATH ?? "";
 
 export function rexBlockCommand(env: Record<string, string>, argv: string[]): string[] {
-  return [REX_ENV_PROGRAM, `PATH=${rexPanePath()}`, ...Object.entries(env).map(([k, v]) => `${k}=${v}`), ...argv];
+  const path = rexPanePath();
+  return [REX_ENV_PROGRAM, ...(path ? [`PATH=${path}`] : []), ...Object.entries(env).map(([k, v]) => `${k}=${v}`), ...argv];
 }
 
 interface WindowHit {
@@ -751,19 +762,35 @@ function homeSession(server: string): string {
   return rexApi<{ session_id: string }>(server, "session.create", { label }).session_id;
 }
 
+function findWindow(server: string, window: string, likely: string[]): WindowHit | null {
+  const look = (scope: string): WindowHit | null => {
+    try {
+      const hit = resolveOne(server, "window", window, scope);
+      return hit ? { session: hit.session, window: hit.window || window } : null;
+    } catch (err) {
+      if (!blockGone(err)) throw err;
+      return null;
+    }
+  };
+  for (const scope of [...new Set(likely)]) {
+    const hit = look(scope);
+    if (hit) return hit;
+  }
+  const listed = rexApi<{ sessions?: { session_id?: string }[] | null }>(server, "session.list", {});
+  for (const s of listed.sessions ?? []) {
+    const hit = s.session_id ? look(s.session_id) : null;
+    if (hit) return hit;
+  }
+  return null;
+}
+
 export function rexEnsureHome(projectId: number, _projectName: string): { session: string; window: string } {
   const server = requireServer("", null);
   const recorded = recordedWindow(projectId);
   if (recorded) {
     const scopes = [leadBlockOf(projectId), callerBlock(), sessionName()].filter((s): s is string => !!s);
-    for (const scope of [...new Set(scopes)]) {
-      try {
-        const hit = resolveOne(server, "window", recorded, scope);
-        if (hit) return { session: hit.session, window: hit.window || recorded };
-      } catch (err) {
-        if (!blockGone(err)) throw err;
-      }
-    }
+    const found = findWindow(server, recorded, scopes);
+    if (found) return found;
   }
   return { session: homeSession(server), window: "" };
 }
@@ -780,6 +807,9 @@ interface CreatedReply {
 
 export function rexCreatePane(spec: RexPaneSpec): RexPlaced {
   if (spec.placement === "hidden") floatHidden();
+  if (store !== null && store.inTransaction === false) {
+    throw new Error("rexCreatePane must run inside withWindowClaim, so two hive processes cannot create the same project's tab");
+  }
   const server = requireServer(spec.beside ?? "", null);
   let session: string;
   let window = "";
@@ -804,7 +834,7 @@ export function rexCreatePane(spec: RexPaneSpec): RexPlaced {
         login: false,
         command: rexBlockCommand(spec.env, spec.argv),
         cwd: spec.cwd,
-        exit: { on_completion: !spec.retainOnExit },
+        exit: { on_completion: !spec.retainOnExit, quick_exit_threshold_ms: REX_QUICK_EXIT_MS },
         ...(size ? { size } : {}),
       },
     },

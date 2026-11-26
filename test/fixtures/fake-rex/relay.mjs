@@ -51,7 +51,7 @@ setInterval(() => {
 
 const finish = (exit) => {
   clearInterval(pump);
-  writeFileSync(join(dir, "exit.json"), JSON.stringify(exit));
+  writeFileSync(join(dir, "exit.json"), JSON.stringify({ ...exit, at: Date.now() }));
   process.exit(0);
 };
 child.on("error", (err) => finish({ exit_code: 127, error: err.message }));

@@ -160,11 +160,34 @@ function checkOptions(options) {
 
 const ENV_WORD = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
+const SH_SIMPLE = /^[^;&|<>()$`*?\n'"\\]*$/;
+
 function execedProgram(command) {
-  if (basename(command[0]) !== "env") return command[0];
-  let i = 1;
-  while (i < command.length && ENV_WORD.test(command[i])) i++;
-  return command[i] ?? command[0];
+  let i = 0;
+  if (basename(command[0]) === "env") {
+    i = 1;
+    while (i < command.length && ENV_WORD.test(command[i])) i++;
+  }
+  const program = command[i] ?? command[0];
+  const script = command[i + 2];
+  if (basename(program) === "sh" && command[i + 1] === "-c" && typeof script === "string" && SH_SIMPLE.test(script)) {
+    const words = script.trim().split(/\s+/).filter((w) => !ENV_WORD.test(w));
+    if (words[0] && words[0] !== "exec") return words[0];
+    if (words[1]) return words[1];
+  }
+  return program;
+}
+
+function reapCompleted(state) {
+  for (const block of Object.values(state.blocks)) {
+    const exit = processInfo(block).last_exit;
+    if (!exit || block.options?.exit?.on_completion === false) continue;
+    const threshold = block.options?.exit?.quick_exit_threshold_ms ?? 250;
+    const raw = exitOf(block);
+    const failed = (exit.exit_code ?? 0) !== 0;
+    if (failed && (raw?.at ?? 0) - (block.started_at ?? 0) < threshold) continue;
+    closeBlock(state, block);
+  }
 }
 
 function commandOf(options) {
@@ -180,6 +203,7 @@ function startProcess(state, block) {
   writeFileSync(join(block.dir, "input"), "");
   writeFileSync(join(block.dir, "output"), "");
   const owner = process.env.FAKE_REX_OWNER ?? "0";
+  block.started_at = Date.now();
   const relay = spawn(process.execPath, [RELAY, block.dir, block.cwd, STATE, owner, ...block.command], {
     detached: true,
     stdio: "ignore",
@@ -339,7 +363,9 @@ function jsonBoundedSlice(buf, start, maxBytes) {
 }
 
 function processInfo(block) {
-  const exit = exitOf(block) && loginWrapped(block) ? { exit_code: 0 } : exitOf(block);
+  const raw = exitOf(block);
+  const { at: _at, ...ended } = raw ?? {};
+  const exit = raw && loginWrapped(block) ? { exit_code: 0 } : raw ? ended : null;
   if (loginWrapped(block) && block.child_pid && !exit) {
     const login = { pid: block.child_pid, name: "login", argv0: null, cwd: block.cwd, user: process.env.USER ?? "", user_id: process.getuid?.() ?? 0 };
     return { child: login, foreground: login, home: FAKE_HOME, last_exit: null };
@@ -818,6 +844,7 @@ function main(argv) {
     process.stderr.write(`Error: no Rex server is running at ${socketPathOf(server)}, and autostart is disabled\n`);
     return 4;
   }
+  withLock(reapCompleted);
   const [cmd, ...tail] = rest;
   switch (cmd) {
     case "whoami": {
