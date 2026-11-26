@@ -487,6 +487,19 @@ function sendKey(block, key) {
   }
 }
 
+function portsReply(block) {
+  const ports = Date.now() >= (block.ports_at ?? 0) ? block.ports ?? [] : [];
+  const pids = [...new Set(ports.map((p) => p.pid).filter((pid) => pid !== undefined))].sort((a, b) => a - b);
+  const describe = (list) => pids.filter((pid) => list.some((p) => p.pid === pid)).map((pid) => ({ pid, user_id: process.getuid?.() ?? 0, name: "node" }));
+  const status = block.ports_status ?? "ok";
+  const keep = block.ports_keep;
+  if (keep === undefined || ports.length <= keep) return { status, ports, processes: describe(ports) };
+  const id = (block.blob_seq = (block.blob_seq ?? 0) + 1);
+  writeFileSync(join(block.dir, `blob-${id}`), JSON.stringify({ status, ports, processes: describe(ports) }));
+  const head = ports.slice(0, keep);
+  return { id, status, ports: head, processes: describe(head), truncated: true };
+}
+
 function blockMethod(state, params, method, args) {
   const block = requireBlock(state, params);
   switch (method) {
@@ -517,7 +530,7 @@ function blockMethod(state, params, method, args) {
     case "program_status":
       return { records: block.program_status };
     case "ports":
-      return { status: "ok", ports: block.ports, processes: [], truncated: false };
+      return portsReply(block);
     case "resize":
       block.size = { columns: args?.columns ?? block.size.columns, rows: args?.rows ?? block.size.rows };
       return {};
@@ -933,9 +946,15 @@ function fakeOp(op, raw) {
         state.clients = args.clients ?? [];
         state.perform_error = args.perform_error ?? null;
         return {};
-      case "setPorts":
-        state.blocks[args.block_id].ports = args.ports ?? [];
+      case "setPorts": {
+        const block = state.blocks[args.block_id];
+        const pid = block.child_pid ?? undefined;
+        block.ports = (args.ports ?? []).map((p) => ({ address: "127.0.0.1", protocol: "tcp", first_seen_at: new Date().toISOString(), ...(pid === undefined ? {} : { pid }), ...p }));
+        block.ports_at = Date.now() + (args.after_ms ?? 0);
+        block.ports_status = args.status ?? "ok";
+        block.ports_keep = args.keep;
         return {};
+      }
       default:
         fail("bad_request", `unknown fake op ${op}`);
     }

@@ -14,7 +14,16 @@ export interface ProcessSnapshot {
   running: boolean;
   visibility: PaneVisibility | null;
   startedAt: string | null;
+  ports?: number[];
 }
+
+export const portsLabel = (ports: number[] | undefined): string | null =>
+  ports && ports.length > 0 ? `ports ${ports.join(", ")}` : null;
+
+export const describeProcess = (p: ProcessSnapshot): string => {
+  const ports = portsLabel(p.ports);
+  return ports ? `${describeVisibility(p.visibility)} (${ports})` : describeVisibility(p.visibility);
+};
 
 export const describeVisibility = (visibility: PaneVisibility | null): string =>
   visibility === null ? "running" : visibility === "window" ? "own window" : visibility;
@@ -873,8 +882,10 @@ function renderProcessesSection(index: SectionMeta[], procs: ProcessSnapshot[]):
   const rows = procs
     .map((p) => {
       const when = p.startedAt ? `started ${timeEl(p.startedAt)}` : `<span class="muted">start with hive start</span>`;
+      const ports = portsLabel(p.ports);
       return (
         `<li class="wake"><span class="row-main">${processStateEl(p)} ${mono(p.name)} ` +
+        (ports ? `<span class="muted">${escapeHtml(ports)}</span> ` : "") +
         `<span class="muted">${when}</span></span></li>`
       );
     })
