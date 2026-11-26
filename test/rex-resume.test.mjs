@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 
@@ -87,15 +87,51 @@ function giveSessions({ lead, worker }) {
   db.prepare("INSERT OR REPLACE INTO lead_turn_state (agent_id, pane_pid, session_id) VALUES (?, ?, ?)").run(lead.id, lead.pane_pid, `sess-${lead.id}`);
 }
 
-function runResume(agentId, block, shellMarker) {
-  const shell = join(dirs.tmp, "marker-shell");
+function markerShell(shellMarker) {
+  const shell = join(dirs.tmp, `marker-shell-${shellMarker}`);
   writeFileSync(shell, `#!/bin/sh\necho ${shellMarker}\n`);
   chmodSync(shell, 0o755);
-  const run = spawnSync("/bin/sh", ["-c", REX_RESUME_SCRIPT, "hive", process.execPath, CLI, "__rex-resume", String(agentId), "--data-dir", dirs.dataDir], {
-    env: { ...fake.env, REX_BLOCK: block, SHELL: shell },
+  return shell;
+}
+
+const resumeArgs = (id) => [process.execPath, CLI, "__rex-resume", String(id), "--data-dir", dirs.dataDir];
+
+function resumeEnv(block, extra = {}) {
+  const env = { ...fake.env, ...extra };
+  if (block === undefined) delete env.REX_BLOCK;
+  else env.REX_BLOCK = block;
+  return env;
+}
+
+function runResume(agentId, block, shellMarker) {
+  const run = spawnSync("/bin/sh", ["-c", REX_RESUME_SCRIPT, "hive", ...resumeArgs(agentId)], {
+    env: resumeEnv(block, { SHELL: markerShell(shellMarker) }),
     encoding: "utf8",
+    timeout: 20000,
   });
   return `${run.stdout}${run.stderr}`;
+}
+
+function startResume(agentId, block) {
+  return spawn("/bin/sh", ["-c", REX_RESUME_SCRIPT, "hive", ...resumeArgs(agentId)], { env: resumeEnv(block), stdio: "ignore", detached: true });
+}
+
+function killGroup(child) {
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch {}
+}
+
+async function killAndWait(pid) {
+  process.kill(Number(pid), "SIGKILL");
+  await waitFor(() => {
+    try {
+      process.kill(Number(pid), 0);
+      return false;
+    } catch {
+      return true;
+    }
+  });
 }
 
 describe("Rex restart survival", () => {
@@ -144,6 +180,96 @@ describe("Rex restart survival", () => {
     assert.equal(dumpsOf(worker.name).length, 1, "no second harness was launched");
   });
 
+  it("__rex-resume refuses a live harness, a claimed pid equal to the recorded one, a missing REX_BLOCK and a non-decimal id", async () => {
+    const { worker } = await startProject("rex-live");
+    db.prepare("UPDATE agents SET session_id = 'sess-live' WHERE id = ?").run(worker.id);
+    const refusal = (reason) => new RegExp(`hive: not resuming ${worker.name}: ${reason}`);
+
+    const live = runResume(worker.id, worker.tmux_target, "SHELL-RAN-LIVE");
+    assert.match(live, refusal(`its recorded process ${worker.pane_pid} is still running`));
+    assert.match(live, /SHELL-RAN-LIVE/);
+
+    const noBlock = runResume(worker.id, undefined, "SHELL-RAN-NOBLOCK");
+    assert.match(noBlock, refusal("REX_BLOCK is not set, so this is not a restored Rex block"));
+    assert.match(noBlock, /SHELL-RAN-NOBLOCK/);
+
+    const hexId = `0x${worker.id.toString(16)}`;
+    const hex = runResume(hexId, worker.tmux_target, "SHELL-RAN-HEX");
+    assert.match(hex, new RegExp(`hive: not resuming agent ${hexId}: ${hexId} is not an agent id`));
+    assert.match(hex, /SHELL-RAN-HEX/);
+
+    let out = "";
+    const child = spawn("/bin/sh", ["-c", `read _; ${REX_RESUME_SCRIPT}`, "hive", ...resumeArgs(worker.id)], {
+      env: resumeEnv(worker.tmux_target, { SHELL: markerShell("SHELL-RAN-EQUAL") }),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (out += d));
+    const closed = new Promise((r) => child.on("close", r));
+    try {
+      db.prepare("UPDATE agents SET pane_pid = ? WHERE id = ?").run(String(child.pid), worker.id);
+      child.stdin.end("\n");
+      await waitFor(() => /SHELL-RAN-EQUAL/.test(out) || dumpsOf(worker.name).length > 1, { timeoutMs: 15000 });
+      assert.match(out, refusal(`its recorded process ${child.pid} is still running`));
+      assert.match(out, /SHELL-RAN-EQUAL/);
+      await closed;
+    } finally {
+      child.kill("SIGKILL");
+      db.prepare("UPDATE agents SET pane_pid = ? WHERE id = ?").run(worker.pane_pid, worker.id);
+    }
+    const row = rowById(worker.id);
+    assert.equal(row.pane_pid, worker.pane_pid, "no refused resume records a pid");
+    assert.equal(row.agent_state, worker.agent_state, "nor resets the worker's state");
+    assert.equal(row.resumed_at, worker.resumed_at);
+    assert.equal(dumpsOf(worker.name).length, 1, "no second harness was launched");
+  });
+
+  it("__rex-resume refuses when the row changes before its pid is recorded, and runs a shell", async () => {
+    const { worker } = await startProject("rex-race");
+    db.prepare("UPDATE agents SET session_id = 'sess-race' WHERE id = ?").run(worker.id);
+    await killAndWait(worker.pane_pid);
+    db.exec(`CREATE TRIGGER rex_race_ignore BEFORE UPDATE OF pane_pid ON agents WHEN OLD.id = ${worker.id} BEGIN SELECT RAISE(IGNORE); END`);
+    let out;
+    try {
+      out = runResume(worker.id, worker.tmux_target, "SHELL-RAN-RACE");
+    } finally {
+      db.exec("DROP TRIGGER rex_race_ignore");
+    }
+    assert.match(out, new RegExp(`hive: not resuming ${worker.name}: its row changed while it was being resumed`));
+    assert.match(out, /SHELL-RAN-RACE/);
+    assert.equal(rowById(worker.id).pane_pid, worker.pane_pid);
+    assert.equal(dumpsOf(worker.name).length, 1, "no second harness was launched");
+  });
+
+  it("__rex-resume resumes a row whose recorded pid now belongs to an unrelated process, as after a reboot", async () => {
+    const { worker } = await startProject("rex-reuse");
+    db.prepare("UPDATE agents SET session_id = 'sess-reuse' WHERE id = ?").run(worker.id);
+    await killAndWait(worker.pane_pid);
+    const stranger = spawn("sleep", ["600"], { stdio: "ignore" });
+    db.prepare("UPDATE agents SET pane_pid = ? WHERE id = ?").run(String(stranger.pid), worker.id);
+    const child = startResume(worker.id, worker.tmux_target);
+    try {
+      await waitFor(() => dumpsOf(worker.name).some((d) => d.pid === String(child.pid)), { timeoutMs: 10000 });
+      assert.equal(rowById(worker.id).pane_pid, String(child.pid), "the restored shell owns the row, not the stranger holding the old pid");
+    } finally {
+      killGroup(child);
+      stranger.kill("SIGKILL");
+      db.prepare("UPDATE agents SET status = 'closed' WHERE id = ?").run(worker.id);
+    }
+  });
+
+  it("__rex-resume refuses a lead whose project directory is gone, before recording anything", async () => {
+    const started = await startProject("rex-gone");
+    const { dir, lead } = started;
+    giveSessions(started);
+    await killAndWait(lead.pane_pid);
+    renameSync(dir, `${dir}-moved`);
+    const out = runResume(lead.id, lead.tmux_target, "SHELL-RAN-GONE");
+    assert.match(out, new RegExp(`hive: not resuming ${lead.name}: its working directory ${dir} is gone`));
+    assert.match(out, /SHELL-RAN-GONE/);
+    assert.equal(rowById(lead.id).pane_pid, lead.pane_pid, "the lead row still names its old process");
+  });
+
   it("__rex-resume restores a worker with HIVE_AGENT_ID and HIVE_PROJECT_LOCK", async () => {
     const started = await startProject("rex-restore");
     const { lead, worker } = started;
@@ -180,21 +306,23 @@ describe("Rex restart survival", () => {
   it("__rex-resume brings a worker the janitor marked lost mid-restart back to running in its own block", async () => {
     const { worker } = await startProject("rex-lost");
     db.prepare("UPDATE agents SET session_id = 'sess-lost' WHERE id = ?").run(worker.id);
-    process.kill(Number(worker.pane_pid), "SIGKILL");
-    await waitFor(() => {
-      try {
-        process.kill(Number(worker.pane_pid), 0);
-        return false;
-      } catch {
-        return true;
-      }
-    });
+    await killAndWait(worker.pane_pid);
     db.prepare("UPDATE agents SET status = 'closed', closed_at = datetime('now'), recovery_state = 'pending' WHERE id = ?").run(worker.id);
-    const child = spawn("/bin/sh", ["-c", REX_RESUME_SCRIPT, "hive", process.execPath, CLI, "__rex-resume", String(worker.id), "--data-dir", dirs.dataDir], {
-      env: { ...fake.env, REX_BLOCK: worker.tmux_target },
-      stdio: "ignore",
-      detached: true,
+
+    const stranger = spawn("sleep", ["600"], { stdio: "ignore" });
+    const forged = spawnSync(process.execPath, resumeArgs(worker.id).slice(1), {
+      env: resumeEnv(worker.tmux_target, { HIVE_REX_RESUME_PID: String(stranger.pid) }),
+      stdio: ["ignore", "pipe", "pipe", "pipe"],
+      encoding: "utf8",
+      timeout: 20000,
     });
+    stranger.kill("SIGKILL");
+    assert.match(forged.stderr, new RegExp(`hive: not resuming ${worker.name}: the restored process id ${stranger.pid} is not the shell running this resume`));
+    assert.equal(forged.output[3], "", "a forged pid gets no launch line");
+    assert.equal(rowById(worker.id).pane_pid, worker.pane_pid, "nor is it recorded");
+    assert.equal(rowById(worker.id).status, "closed");
+
+    const child = startResume(worker.id, worker.tmux_target);
     try {
       await waitFor(() => dumpsOf(worker.name).some((d) => d.pid === String(child.pid)), { timeoutMs: 10000 });
       const row = rowById(worker.id);
@@ -205,14 +333,12 @@ describe("Rex restart survival", () => {
       assert.equal(dump.env.HIVE_PROJECT_LOCK, "1");
       assert.equal(dump.env.HIVE_AGENT_ID, worker.actor_id);
     } finally {
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch {}
+      killGroup(child);
       db.prepare("UPDATE agents SET status = 'closed' WHERE id = ?").run(worker.id);
     }
   });
 
-  it("without the trust rule, restored blocks are shells and their rows are reaped", async () => {
+  it("without the trust rule, restored blocks are shells: the worker row is reaped and the lead row reads reissued", async () => {
     const started = await startProject("rex-untrusted");
     const { dir, lead, worker } = started;
     giveSessions(started);
@@ -228,6 +354,8 @@ describe("Rex restart survival", () => {
     assert.equal(rowById(worker.id).status, "closed", "the janitor reaps the worker row");
     assert.equal(rowById(worker.id).recovery_state, "pending", "as a lost worker crew-restore can bring back");
     assert.ok(existsSync(state.blocks[worker.tmux_target].dir));
+    assert.equal(rowById(lead.id).status, "running", "the janitor never sweeps a lead");
+    assert.equal(terminal.rowOwnership(rowById(lead.id)), "reissued", "so hive lead restarts it");
   });
 
   it("a block still inside hive's launch shell reads unknown, while one running another program reads reissued", () => {
@@ -243,7 +371,7 @@ describe("Rex restart survival", () => {
     assert.equal(terminal.rowOwnership(blockRunning("other", ["sleep", "600"])), "reissued");
   });
 
-  it("hive setup --rex-resume prints the rule and writes nothing", async () => {
+  it("hive setup --rex-resume prints the rule and writes nothing to Rex's config", async () => {
     const home = mkdtempSync(join(dirs.tmp, "home-"));
     const config = join(home, ".config", "rex");
     mkdirSync(config, { recursive: true });

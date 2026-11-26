@@ -1,5 +1,7 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
+import { basename } from "node:path";
 import { db, dataDir } from "./db.js";
 import { isDefaultStore } from "./dataDir.js";
 import type { AgentRow } from "./agentRecords.js";
@@ -81,6 +83,28 @@ function processAlive(pid: string): boolean {
   }
 }
 
+function psField(pid: string | number, field: string): string | null {
+  try {
+    return execFileSync("ps", ["-o", `${field}=`, "-p", String(pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 }).trim();
+  } catch {
+    return null;
+  }
+}
+
+// dash execs the substitution's command, so node's parent is $$; bash forks a subshell first.
+function isResumingShell(pid: string): boolean {
+  return Number(pid) === process.ppid || psField(process.ppid, "ppid") === pid;
+}
+
+// Fail-safe: unless ps shows a process that names none of the row's program, it is the harness.
+function recordedProcessRunning(row: AgentRow): boolean {
+  if (!processAlive(row.pane_pid)) return false;
+  const words = commandArgv(row.command);
+  const program = words[0] === REX_SHELL ? "" : basename(words[0] ?? "");
+  const args = psField(row.pane_pid, "args");
+  return !program || !args || args.split(/\s+/).some((word) => basename(word).includes(program));
+}
+
 interface ResumeLaunch {
   commandString: string;
   env: Record<string, string>;
@@ -105,6 +129,7 @@ function workerLaunch(row: AgentRow, projectPath: string, projectId: number): Re
 function leadLaunch(row: AgentRow, projectPath: string): ResumeLaunch {
   const harness = harnessFor(row.command);
   if (!harness.supportsResume) refuse(row.name, `its harness (${harness.name}) cannot resume a session`);
+  if (!existsSync(projectPath)) refuse(row.name, `its working directory ${projectPath} is gone`);
   const turn = db.prepare("SELECT session_id FROM lead_turn_state WHERE agent_id = ? AND pane_pid = ?").get(row.id, row.pane_pid) as
     | { session_id: string }
     | undefined;
@@ -155,10 +180,11 @@ export function rexResumeLine(agentId: number, pid: string | undefined, block: s
   if (row.tmux_target !== block) refuse(row.name, `its row records block ${row.tmux_target || "(none)"}, not this block ${block}`);
   if (!row.tmux_socket.startsWith(REX_SOCKET_PREFIX)) refuse(row.name, "its row is not on a Rex server");
   if (!pid || !/^[1-9]\d*$/.test(pid)) refuse(row.name, "the restored process id is unknown");
+  if (!isResumingShell(pid!)) refuse(row.name, `the restored process id ${pid} is not the shell running this resume`);
   const pending = row.kind !== LEAD_KIND && row.status === "closed" && row.recovery_state === "pending" && !row.parked_at;
   if (row.status !== "running" && !pending) refuse(row.name, `its row is ${row.status}, not running or waiting for crash recovery`);
   if (row.kind !== LEAD_KIND && row.kind !== "agent") refuse(row.name, "only workers and leads are resumed");
-  if (row.pane_pid !== pid && processAlive(row.pane_pid)) refuse(row.name, `its recorded process ${row.pane_pid} is still running`);
+  if (row.pane_pid === pid || recordedProcessRunning(row)) refuse(row.name, `its recorded process ${row.pane_pid} is still running`);
   const project = getProject(row.project_id);
   if (!project) return refuse(row.name, `project ${row.project_id} is no longer registered`);
   const launch = row.kind === LEAD_KIND ? leadLaunch(row, project.path) : workerLaunch(row, project.path, project.id);

@@ -350,7 +350,7 @@ Usage:
                              HIVE_TERMINAL and a project's hive.yml win over it
   hive setup --rex-resume    print the Rex init.lua trust rule that lets Rex
                              resume hive leads and workers after a restart;
-                             writes nothing
+                             writes nothing to Rex's config
   hive doctor [--strict] [--verbose]
                              check the environment and clean up stale state;
                              --strict also exits non-zero on warnings that mean
@@ -2062,6 +2062,7 @@ function cmdRexLaunch(argv: string[]): void {
 function cmdRexResume(argv: string[]): void {
   try {
     fstatSync(3);
+    if (!/^[1-9]\d*$/.test(argv[0] ?? "")) throw new Error(`${argv[0] ?? "(none)"} is not an agent id`);
     writeSync(3, `${rexResumeLine(Number(argv[0]), process.env[REX_RESUME_PID_ENV], rexCallerBlock() ?? undefined)}\n`);
     process.exit(0);
   } catch (e) {
@@ -2076,7 +2077,8 @@ function printRexResumeRule(): void {
   console.log("with their hive identity. hive never edits init.lua. Then run: rex config reload\n");
   console.log(rexResumeTrustRule());
   console.log(`\nTo remove it, delete those lines, or add rex.set("resume.trust.${REX_RESUME_RULE_NAME}", false), then rex config reload.`);
-  console.log("Without it, a restored hive block comes back as a shell and hive closes its row.");
+  console.log("Without it, a restored hive block comes back as a shell: hive closes a worker's row so crew-restore");
+  console.log("can bring it back, and a lead reads reissued until hive lead restarts it.");
 }
 
 const LEAD_PANE_EXITED_HOOK = "pane-exited";
