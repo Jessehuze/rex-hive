@@ -12,6 +12,9 @@ layout: main-vertical           # pane arrangement for placement: split.
                                 # main-* gives the lead half the window.
 
 lead: claude                    # custom command for the lead window (default: claude)
+# terminal: tmux                # tmux (default) | rex; read when a lead starts, and its
+#                               # workers keep that lead's terminal. HIVE_TERMINAL wins.
+# workers: shown                # shown (default) | hidden: how new workers start
 
 agents: [claude, codex]         # crew harness pool agent_spawn may pick from; claude is first so
                                 # it stays the default. lead: above is separate and unaffected.
@@ -50,6 +53,7 @@ processes:
 #     command: npx tsc --watch --preserveWatchOutput
 #     dir: ./packages/api       # relative to the project root
 #     auto_start: false         # start manually with: hive start typecheck
+#     wait_for_port: 3000       # hive start waits for this port; true waits for any
 #     visible: false            # tile it in one <project>/processes window instead of
 #                               # following placement: above; hive show/hide move it (default true)
 #     env:
