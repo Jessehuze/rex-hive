@@ -832,7 +832,7 @@ export function registerAgents(server: McpServer): void {
                 // a live dialog, and choiceCheck's own capture is tuned to read a live screen.
                 exited = true;
                 exitTail = captureFinalScreen(target, 30);
-                db.prepare("UPDATE agents SET exit_tail = ? WHERE id = ?").run(exitTail, agentId);
+                if (exitTail || !isRexTarget(target)) db.prepare("UPDATE agents SET exit_tail = ? WHERE id = ?").run(exitTail, agentId);
                 discardOrphanedPane(target);
               } else {
                 const { awaitingChoice, tail } = classifier.choiceCheck(target);
@@ -1151,7 +1151,7 @@ export function registerAgents(server: McpServer): void {
         if (readiness === "gone") {
           exited = true;
           tail = captureFinalScreen(spawned.target, 30);
-          db.prepare("UPDATE agents SET exit_tail = ? WHERE id = ?").run(tail, spawned.agentId);
+          if (tail || !isRexTarget(spawned.target)) db.prepare("UPDATE agents SET exit_tail = ? WHERE id = ?").run(tail, spawned.agentId);
           discardOrphanedPane(spawned.target);
         } else if (readiness === "ready") {
           const choice = classifier.choiceCheck(spawned.target);

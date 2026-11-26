@@ -205,7 +205,7 @@ import {
   waitForPaneEstablished,
   windowLayout,
 } from "./terminal.js";
-import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexRefuseQuickExit, rexRefusal } from "./terminal/rex.js";
+import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexHideProcess, rexLayoutProject, rexProjectLead, rexRefuseQuickExit, rexShowProcess, rexVisibility } from "./terminal/rex.js";
 import { collectCrew, crewStoreProblem } from "./crew.js";
 import { resumeWorker, validateResumeWorker } from "./agentResume.js";
 import { markWorkerLost } from "./workerRecovery.js";
@@ -489,7 +489,6 @@ function startYmlCommand(
 ): StartResult {
 
   if (!trusted) return { status: "refused", reason: "untrusted" } as const;
-  if (rexLeadFor(project.id, currentActor())) return { status: "failed", message: rexRefusal("hive.yml processes") } as const;
 
   if (isReservedAgentName(name)) {
     return {
@@ -505,8 +504,8 @@ function startYmlCommand(
 
     const live = rowLive(existing.tmux_socket, existing.tmux_target);
     if (live) {
-      const windows = projectWindows(sessionName(), project.id);
-      const where = windows === null ? null : paneVisibility(existing.tmux_target, windows);
+      const windows = isRexTarget(existing.tmux_target) ? null : projectWindows(sessionName(), project.id);
+      const where = isRexTarget(existing.tmux_target) ? rexVisibility(existing.tmux_target, null) : windows === null ? null : paneVisibility(existing.tmux_target, windows);
       return { status: "already-running", location: where === "shown" || where === "hidden" ? where : null } as const;
     }
 
@@ -545,7 +544,7 @@ function startYmlCommand(
     if (proc.visible) {
 
       // Its own window never set a pane title, so a status line rendering #T showed the hostname.
-      setPaneTitle(target, shownPaneTitle(project.name, name));
+      if (!isRexTarget(target)) setPaneTitle(target, shownPaneTitle(project.name, name));
       if (landedInProjectId != null) {
         const landedName = getProject(landedInProjectId)?.name ?? `project ${landedInProjectId}`;
         return { status: "started", message: `started, landed in project "${landedName}"'s window` } as const;
@@ -2096,6 +2095,7 @@ function cmdShow(argv: string[]): void {
   const found = resolveNamedProcess(argv, "show");
   if (!found) return;
   const { project, name, config, target } = found;
+  if (isRexTarget(target)) return console.log(withWindowClaim(() => rexShowProcess(project.id, name, target, config.placement ?? "split", `${project.name}/${name}`)));
   const session = sessionName();
 
   // Read the window inside the claim, never before it: tmux destroys a window when its last pane
@@ -2120,6 +2120,7 @@ function cmdHide(argv: string[]): void {
   const found = resolveNamedProcess(argv, "hide");
   if (!found) return;
   const { project, name, target } = found;
+  if (isRexTarget(target)) return console.log(withWindowClaim(() => rexHideProcess(project.id, name, target)));
   const session = sessionName();
 
   // One claim over the whole decision: the group window comes and goes with its last pane, so both
@@ -2172,6 +2173,12 @@ function cmdLayout(argv: string[]): void {
   }
   const layout = config?.layout ?? DEFAULT_LAYOUT;
   const session = sessionName();
+  if (rexProjectLead(project.id)) {
+    const rex = withWindowClaim(() => rexLayoutProject(project.id, layout));
+    console.log(rex.lines.join("\n"));
+    process.exitCode = rex.exitCode;
+    return;
+  }
 
   const result = withWindowClaim((): { lines: string[]; exitCode: number } => {
     const snapshot = liveTargets();

@@ -18,7 +18,7 @@ if (!db.name.startsWith(dirs.dataDir)) throw new Error(`refusing: opened ${db.na
 migrate();
 await import("../dist/rexInUse.js");
 const handoff = await import("../dist/leadHandoff.js");
-const { tick } = await import("../dist/scheduler.js");
+const { janitor, tick } = await import("../dist/scheduler.js");
 const { rexUnownedBlocks } = await import("../dist/terminal/rex.js");
 const { rexApi } = await import("../dist/rexCli.js");
 const { sendQuietLeadMessage, retryQuietLeadMessages } = await import("../dist/leadMessageDelivery.js");
@@ -233,8 +233,10 @@ describe("Rex lead handoff", () => {
     await until(() => ["started", "completed"].includes(handoffRow(id).state), 30_000, 100, `handoff started: ${JSON.stringify(handoffRow(id))}`);
     const row = leadRow(db, ctx.project.id);
     assert.notEqual(row.tmux_target, old);
+    janitor();
     const state = fake.state();
-    assert.ok(state.blocks[old], "the old block was never closed");
+    assert.ok(state.blocks[old], "the old block was never closed, and the janitor's exited-block reap left it alone");
+    assert.ok(state.blocks[row.tmux_target], "the janitor left the new lead block alone");
     assert.equal(state.blocks[old].label, `${ctx.project.name}/lead`);
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM agents WHERE tmux_target = ?").get(old).n, 0, "no row points at the old block");
     assert.deepEqual(layerOf(ctx.window, row.tmux_target).blocks, [row.tmux_target, old], "the new block sits where the old one was");
