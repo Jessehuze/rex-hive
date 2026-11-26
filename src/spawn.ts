@@ -9,33 +9,33 @@ import { loadProjectYml } from "./projectYml.js";
 import { WORKER_RECOVERY_RETENTION_SECONDS } from "./workerRecovery.js";
 import { removeReadOnlyTmpDir } from "./hooks.js";
 import {
-  applyLayout,
-  claimInitialWindow,
-  createWindow,
   DEFAULT_LAYOUT,
-  ensureSession,
-  crossServerRefusal,
-  findProcessesWindow,
-  findProjectWindow,
   isPaneTarget,
-  paneWindow,
   PROCESSES_LAYOUT,
   processesPaneTitle,
   processesWindowName,
   retainOnExitArgs,
   sessionName,
-  setPaneTitle,
-  makeProcessesWindow,
-  tmux,
   paneEnvPath,
-  tmuxWithClientPath,
-  tmuxSocketPath, untrustedTmuxServer,
-  windowLayout,
-  windowOwner, windowTitle,
+  windowTitle,
   type AliveSnapshot,
   type RowOwnership, type WindowLayout,
   type RowPaneIdentity,
 } from "./tmux.js"; import {
+  applyLayout, callerSocket,
+  claimInitialWindow, createWindow,
+  ensureSession, crossServerRefusal,
+  findProcessesWindow, findProjectWindow,
+  killPane,
+  killWindow,
+  paneWindow, paneWindowStamps,
+  renameWindow,
+  setPaneTitle,
+  makeProcessesWindow,
+  splitPane,
+  untrustedTmuxServer,
+  windowLayout,
+  windowOwner,
   paneProcessExited,
   rowLive,
   setRemainOnExit,
@@ -190,13 +190,13 @@ export function killAgentPane(target: string): void {
 }
 
 export function killAgentPaneWithoutRelayout(target: string): void {
-  tmux(isPaneTarget(target) ? "kill-pane" : "kill-window", "-t", target);
+  if (isPaneTarget(target)) killPane(target); else killWindow(target);
 }
 
 export function discardOrphanedPane(target: string): void {
   try {
     waitForPaneEstablished(target);
-    tmux("kill-pane", "-t", target);
+    killPane(target);
   } catch {
 
   }
@@ -276,11 +276,11 @@ function placeAgentPane(
       return claimInitialWindow(started, windowName, windowOwnerId).pane;
     }
     const splitInto = (window: string, layout: WindowLayout): string => {
-      const [pane, created = ""] = tmuxWithClientPath(paneEnvPath(),
+      const { target: pane, pid: created } = splitPane({ clientPath: paneEnvPath(), argv: [
         "split-window", "-d", "-P", "-F", "#{pane_id}\t#{pane_pid}",
         "-t", window, "-c", spec.cwd, ...envFlags, commandString,
         ...(spec.retainOnExit ? retainOnExitArgs(window) : []),
-      ).split("\t");
+      ] });
       pid = created;
       if (spec.retainOnExit) onRetainArmed(window);
       applyLayout(window, layout);
@@ -338,7 +338,7 @@ export function launchAgent(spec: LaunchSpec): {
 
   if (untrustedTmuxServer()) throw crossServerRefusal("spawn");
 
-  const socket = tmuxSocketPath(process.env.TMUX, process.env.TMUX_TMPDIR);
+  const socket = callerSocket();
   let info;
   try {
     info = db
@@ -476,7 +476,7 @@ export function resumeAgent(
 ): { target: string; landedInProjectId: number | null } {
 
   if (untrustedTmuxServer()) throw crossServerRefusal("resume");
-  const socket = tmuxSocketPath(process.env.TMUX, process.env.TMUX_TMPDIR);
+  const socket = callerSocket();
 
   let flip: { before: Record<string, string | null> | undefined; changes: number };
 
@@ -541,8 +541,8 @@ export function resumeAgent(
 
 function ownsItsWindow(target: string, expectedTitle: string): boolean {
   try {
-    const [name, projectStamp, owned] = tmux(
-      "list-panes", "-t", target, "-F", "#{window_name}\t#{@hive-project-id}\t#{@hive-owned}",
+    const [name, projectStamp, owned] = paneWindowStamps(
+      target,
     )
       .split("\n")[0]
       .split("\t");
@@ -571,7 +571,7 @@ export function renameAgent(
 
   if (projectName !== null && ownsItsWindow(agent.tmux_target, windowTitle(projectName, agent.name))) {
     try {
-      tmux("rename-window", "-t", agent.tmux_target, windowTitle(projectName, newName));
+      renameWindow(agent.tmux_target, windowTitle(projectName, newName));
     } catch {
 
     }

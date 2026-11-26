@@ -13,7 +13,19 @@ const FACADE_NAMES = [
   "paneCurrentCommand", "paneTitle", "inputBoxSnapshot", "inputBoxState", "claudeTrailerView",
   "paneChoiceCheck", "paneAwaitingChoice", "codexInputBoxState", "codexTrailerView", "codexPaneChoiceCheck",
   "pollPaneReadiness", "waitForPaneInput", "waitForPaneEstablished", "setRemainOnExit", "captureFinalScreen",
-  "foreignSocket",
+  "foreignSocket", "adoptableWindow", "appendGlobalHook", "applyLayout", "claimInitialWindow",
+  "codexPaneHasInputBox", "configureHiveWindow", "createWindow", "crossServerRefusal", "ensureAttached",
+  "ensureSession", "findProcessesWindow", "findProjectWindow", "globalHooks", "listOwnedWindows",
+  "makeProcessesWindow", "orphanScratchServers", "paneHasInputBox", "paneIsAloneInWindow", "paneVisibility",
+  "paneWindow", "projectWindows", "replaceGlobalHooks", "resolveAttachTarget", "resolveInTmuxTarget",
+  "setPaneTitle", "untrustedTmuxServer", "windowLayout", "windowOwner",
+];
+
+const FACADE_WRAPPERS = [
+  "callerPane", "callerSocket", "callerTmuxTmpDir", "insideTerminal", "killPane", "killWindow", "splitPane",
+  "respawnPane", "attachInteractive", "createBareWindow", "renameWindow", "listPaneIds", "paneWindowStamps",
+  "joinPane", "breakPane", "swapPane", "sendKeys", "interruptPane", "terminalVersion", "serverEnvironment",
+  "listSessionNames", "sessionClients", "listWindowOwnership", "showOption",
 ];
 
 const IMPORT_ALLOWLIST = [];
@@ -23,33 +35,16 @@ const PURE_TMUX_EXPORTS = [
   "OrphanScratchServers", "OwnedWindow", "PROCESSES_LAYOUT", "PaneVisibility", "ProjectWindows",
   "RAW_ATTACH_TMUX_CONFIG", "RowOwnership", "RowPaneIdentity", "SESSION_PREFIX", "TEXT_ALLOWED_CONTROL_CHARS",
   "TMUX_DOC", "TMUX_NOT_INSTALLED_MESSAGE", "TmuxError", "TmuxTimeoutError", "TrailerView", "WINDOW_LAYOUTS",
-  "WindowLayout", "controlModeFor", "describePaneChoice", "findUnsafeControlChar", "isPaneTarget",
-  "isViewSessionName", "isWindowLayout", "maskChoiceMarker", "observationFailed", "orphansWorthWarningAbout",
-  "ownershipLiveness", "processesPaneTitle", "processesWindowName", "renderAttachCommand", "renderTrailerView",
+  "WindowLayout", "controlModeFor", "describePaneChoice", "findUnsafeControlChar", "holdsHumanInput",
+  "isPaneTarget", "isViewSessionName", "isWindowLayout", "maskChoiceMarker", "observationFailed",
+  "orphansWorthWarningAbout", "ownershipLiveness", "paneEnvPath", "paneReissued", "processesPaneTitle",
+  "processesWindowName", "renderAttachCommand", "renderTrailerView",
   "retainOnExitArgs", "sanitizeEventForDisplay", "sanitizeTail", "sessionName", "shellQuote", "shownPaneTitle",
   "sleep", "stripControlBytes", "tailCaptureLines", "tmuxNotInstalled", "tmuxSaysNothingThere",
   "tmuxTimeoutOverride", "windowTitle",
 ];
 
-const PENDING_FACADE_NAMES = [
-  "adoptableWindow", "appendGlobalHook", "applyLayout", "claimInitialWindow", "codexPaneHasInputBox",
-  "configureHiveWindow", "createWindow", "crossServerRefusal", "ensureAttached", "ensureSession",
-  "findProcessesWindow", "findProjectWindow", "globalHooks", "holdsHumanInput", "listOwnedWindows",
-  "makeProcessesWindow", "orphanScratchServers", "paneEnvPath", "paneHasInputBox", "paneIsAloneInWindow",
-  "paneReissued", "paneVisibility", "paneWindow", "projectWindows", "replaceGlobalHooks", "resolveAttachTarget",
-  "resolveInTmuxTarget", "setPaneTitle", "tmux", "tmuxSocketPath", "tmuxWithClientPath", "untrustedTmuxServer",
-  "windowLayout", "windowOwner",
-];
-
-const PENDING_TASK_2 = [
-  "src/cli.ts",
-  "src/spawn.ts",
-  "src/tools/agents.ts",
-  "src/processes.ts",
-  "src/leadHandoffCli.ts",
-];
-
-const EXEC_ALLOWLIST = ["src/tmux.ts", "src/terminal.ts", "src/rexCli.ts", ...PENDING_TASK_2];
+const EXEC_ALLOWLIST = ["src/tmux.ts", "src/terminal.ts", "src/rexCli.ts"];
 const EXEC_ALLOWED_PREFIXES = ["src/terminal/"];
 
 function listTs(dir) {
@@ -90,11 +85,25 @@ function tmuxImportViolations(rel, text) {
   return found;
 }
 
-const EXEC_CALL = /\("tmux"|\btmux\(|\("rex"/;
+const EXEC_CALL = /(?<!\bcheck)\("tmux"|\btmux\(|\("rex"/;
 
 function execViolations(rel, text) {
   if (EXEC_ALLOWLIST.includes(rel) || EXEC_ALLOWED_PREFIXES.some((p) => rel.startsWith(p))) return [];
   return EXEC_CALL.test(text) ? [rel] : [];
+}
+
+const ENV_ALLOWLIST = ["src/terminal.ts", "src/tmux.ts", "src/rexCli.ts"];
+const ENV_NAME = String.raw`(?:TMUX(?:_PANE|_TMPDIR)?\b|REX_\w*)`;
+const ENV_READS = [
+  new RegExp(String.raw`process\.env\.${ENV_NAME}`),
+  new RegExp(String.raw`process\.env\[\s*["'\x60]${ENV_NAME}["'\x60]\s*\]`),
+  new RegExp(String.raw`\{[^}]*\b${ENV_NAME}[^}]*\}\s*=\s*process\.env\b`),
+  /[(,]\s*process\.env\s*[,)]/,
+];
+
+function envViolations(rel, text) {
+  if (ENV_ALLOWLIST.includes(rel)) return [];
+  return ENV_READS.some((re) => re.test(text)) ? [rel] : [];
 }
 
 const sources = listTs(SRC).map((path) => ({ rel: relative(REPO, path), text: readFileSync(path, "utf8") }));
@@ -104,14 +113,11 @@ describe("rex seam guard", () => {
     const violations = sources
       .filter(({ rel }) => !IMPORT_ALLOWLIST.includes(rel))
       .flatMap(({ rel, text }) => tmuxImportViolations(rel, text));
-    const unlisted = violations.filter((v) => !PENDING_FACADE_NAMES.includes(v.split(": ")[1]));
-    assert.deepEqual(unlisted, [], "import these from the terminal facade or list them as pure or pending");
+    assert.deepEqual(violations, [], "import these from the terminal facade or list them as pure");
   });
 
-  it("every pending facade name is still imported directly from tmux.js and is not pure", () => {
-    const imported = new Set(sources.flatMap(({ rel, text }) => (isFacadeFile(rel) ? [] : importedTmuxNames(text).names)));
-    assert.deepEqual(PENDING_FACADE_NAMES.filter((n) => !imported.has(n)), []);
-    assert.deepEqual(PENDING_FACADE_NAMES.filter((n) => PURE_TMUX_EXPORTS.includes(n)), []);
+  it("no name is both pure and terminal-touching", () => {
+    assert.deepEqual([...FACADE_NAMES, ...FACADE_WRAPPERS].filter((n) => PURE_TMUX_EXPORTS.includes(n)), []);
   });
 
   it("only tmux.ts, terminal files and rexCli.ts execute tmux or rex", () => {
@@ -119,16 +125,39 @@ describe("rex seam guard", () => {
     assert.deepEqual(violations, []);
   });
 
-  it("every pending-task-2 file still executes tmux directly", () => {
-    const stale = PENDING_TASK_2.filter((rel) => !sources.some((s) => s.rel === rel && EXEC_CALL.test(s.text)));
-    assert.deepEqual(stale, []);
-  });
-
   it("the facade exports every name the guard treats as terminal-touching", () => {
     const facade = sources.find((s) => s.rel === "src/terminal.ts");
     assert.ok(facade, "src/terminal.ts exists");
-    for (const name of [...FACADE_NAMES, "isRexTarget", "isRexSocket", "rexServerOf"]) {
+    for (const name of [...FACADE_NAMES, ...FACADE_WRAPPERS, "isRexTarget", "isRexSocket", "rexServerOf"]) {
       assert.match(facade.text, new RegExp(`\\b${name}\\b`), name);
+    }
+  });
+
+  it("TMUX, TMUX_PANE, TMUX_TMPDIR, REX_BLOCK, REX_SERVER are read only in the facade, tmux.ts and rexCli.ts", () => {
+    const violations = sources.flatMap(({ rel, text }) => envViolations(rel, text));
+    assert.deepEqual(violations, []);
+  });
+
+  it("env guard catches every planted read form and spares the allowlist", () => {
+    for (const read of [
+      "process.env.TMUX",
+      "if (process.env.TMUX) {}",
+      "process.env.TMUX_PANE ?? ''",
+      "process.env.TMUX_TMPDIR",
+      "process.env.REX_BLOCK",
+      "process.env.REX_SERVER",
+      'process.env["TMUX"]',
+      "process.env['TMUX_PANE']",
+      "const { TMUX } = process.env;",
+      "const { HOME, REX_BLOCK: block } = process.env;",
+      "tmuxSocketPath(process.env)",
+      "probe(1, process.env)",
+    ]) {
+      assert.deepEqual(envViolations("src/x.ts", read), ["src/x.ts"], read);
+      assert.deepEqual(envViolations("src/terminal.ts", read), [], read);
+    }
+    for (const clean of ["process.env.TMUX_TIMEOUT", "process.env.HIVE_TMUX_TIMEOUT_MS", "const { HOME } = process.env;", "{ env: process.env }"]) {
+      assert.deepEqual(envViolations("src/x.ts", clean), [], clean);
     }
   });
 
@@ -151,6 +180,8 @@ describe("rex seam guard", () => {
     assert.equal(execViolations("src/x.ts", 'execFileSync("rex", [])').length, 1);
     assert.equal(execViolations("src/x.ts", 'spawnSync("tmux", [])').length, 1);
     assert.equal(execViolations("src/x.ts", 'tmux("kill-pane")').length, 1);
+    assert.equal(execViolations("src/x.ts", 'run("tmux", ["-V"])').length, 1);
+    assert.equal(execViolations("src/x.ts", 'check("tmux", () => version())').length, 0);
     assert.equal(execViolations("src/terminal.ts", 'spawnSync("tmux", [])').length, 0);
     assert.equal(execViolations("src/terminal.ts", 'tmux("kill-pane")').length, 0);
   });

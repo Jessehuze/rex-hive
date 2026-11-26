@@ -1,10 +1,10 @@
 import type { ContextRecordKind } from "./transcript.js";
 import {
-  codexPaneHasInputBox,
-  paneHasInputBox,
-  type InputBoxSnapshot, type InputBoxState,
+  type InputBoxSnapshot,
+  type InputBoxState,
   type TrailerView,
 } from "./tmux.js"; import {
+  codexPaneHasInputBox, paneHasInputBox,
   claudeTrailerView,
   codexInputBoxState, codexTrailerView,
   codexPaneChoiceCheck,

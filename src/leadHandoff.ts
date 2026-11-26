@@ -26,7 +26,7 @@ import {
   STOP_HOLD_CAP_SECONDS,
   SUCCESSOR_NOT_READY,
 } from "./leadHandoffState.js";
-import { holdsHumanInput, tmuxSocketPath } from "./tmux.js"; import { paneInCopyMode, rowOwnership } from "./terminal.js";
+import { holdsHumanInput } from "./tmux.js"; import { callerSocket, paneInCopyMode, rowOwnership } from "./terminal.js";
 import { type LeadSafetySnapshot, type LeadTurnState, readLeadSafetySnapshot } from "./leadState.js";
 import type { LeadTurnBudget } from "./projectYml.js";
 import { readTurnCount } from "./turnCount.js";
@@ -675,7 +675,7 @@ export async function respawnVerdict(row: HandoffRow, lead: RunningLead | undefi
   if (lead === undefined || lead.pane_pid !== row.predecessor_pane_pid || lead.tmux_target !== row.pane_target) {
     return { fail: "the lead row no longer names the pane this handoff was requested for" };
   }
-  if (tmuxSocketPath(process.env.TMUX, process.env.TMUX_TMPDIR) !== row.tmux_socket) {
+  if (callerSocket() !== row.tmux_socket) {
     return { fail: "the grace owner is not talking to the lead's tmux server" };
   }
   const snapshot = readLeadSafetySnapshot(lead.id);

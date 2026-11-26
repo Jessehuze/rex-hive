@@ -141,63 +141,63 @@ import {
   withWindowClaim,
 } from "./spawn.js";
 import {
-  adoptableWindow,
   type AliveSnapshot,
-  applyLayout,
-  claimInitialWindow,
-  configureHiveWindow,
   controlModeFor,
-  createWindow,
   DEFAULT_LAYOUT,
   describePaneChoice,
-  ensureSession,
-  findProjectWindow,
   isViewSessionName,
-  listOwnedWindows,
   observationFailed,
   type OwnedWindow,
   ORPHAN_MIN_AGE_MS,
   type OrphanScratchServers,
-  orphanScratchServers,
   orphansWorthWarningAbout,
-  paneIsAloneInWindow,
-  paneWindow,
-  paneVisibility,
   type ProjectWindows,
   PROCESSES_LAYOUT,
   processesPaneTitle,
   processesWindowName,
-  projectWindows,
   RAW_ATTACH_TMUX_CONFIG,
   renderAttachCommand,
-  resolveAttachTarget,
-  resolveInTmuxTarget,
   type RowOwnership,
   type RowPaneIdentity,
   SESSION_PREFIX,
-  appendGlobalHook,
-  globalHooks,
-  replaceGlobalHooks,
   sessionName,
-  setPaneTitle,
   shellQuote,
   shownPaneTitle,
-  makeProcessesWindow,
-  tmux,
   TMUX_DOC,
   TMUX_NOT_INSTALLED_MESSAGE,
   tmuxNotInstalled, tmuxSaysNothingThere,
   tmuxTimeoutOverride,
-  tmuxSocketPath, untrustedTmuxServer,
-  windowLayout,
 } from "./tmux.js"; import {
-  foreignSocket,
-  liveTargets,
-  observeRowOwnership,
-  panePidForRecord,
+  adoptableWindow, applyLayout,
+  appendGlobalHook, attachInteractive,
+  breakPane, callerSocket, callerTmuxTmpDir,
+  claimInitialWindow, configureHiveWindow,
+  createBareWindow, createWindow,
+  ensureSession, findProjectWindow,
+  foreignSocket, globalHooks,
+  insideTerminal, joinPane,
+  killPane, listOwnedWindows,
+  listPaneIds, listSessionNames,
+  listWindowOwnership, liveTargets,
+  makeProcessesWindow, observeRowOwnership,
+  orphanScratchServers, paneIsAloneInWindow,
+  panePidForRecord, paneVisibility,
+  paneWindow, projectWindows,
+  renameWindow, replaceGlobalHooks,
+  resolveAttachTarget,
+  resolveInTmuxTarget,
   rowLive,
   rowOwnership,
+  serverEnvironment,
+  sessionClients,
+  setPaneTitle,
+  showOption,
+  splitPane,
+  swapPane,
+  terminalVersion,
+  untrustedTmuxServer,
   waitForPaneEstablished,
+  windowLayout,
 } from "./terminal.js";
 import { collectCrew, crewStoreProblem } from "./crew.js";
 import { resumeWorker, validateResumeWorker } from "./agentResume.js";
@@ -555,10 +555,10 @@ function startYmlCommand(
 }
 
 function attach(session: string, project: Project, window?: string): void {
-  if (process.env.TMUX) {
+  if (insideTerminal()) {
 
     const argv = resolveInTmuxTarget(session, window ?? findProjectWindow(session, project.id));
-    if (argv) spawnSync("tmux", argv, { stdio: "inherit" });
+    if (argv) attachInteractive(argv);
     return;
   }
   const controlMode = controlModeFor(process.env.TERM_PROGRAM === "iTerm.app");
@@ -569,8 +569,8 @@ function attach(session: string, project: Project, window?: string): void {
     console.log(`Attach from a terminal with: tmux ${renderAttachCommand(argv)}`);
     return;
   }
-  const result = spawnSync("tmux", argv, { stdio: "inherit" });
-  process.exit(result.status ?? 0);
+  const status = attachInteractive(argv);
+  process.exit(status);
 }
 
 function asLeadNameReuseClash(e: unknown, projectId: number, leadRowId: number): unknown {
@@ -674,7 +674,7 @@ function ensureLeadRow(
       }
     | undefined;
 
-  const insertedSocket = tmuxSocketPath(process.env.TMUX, process.env.TMUX_TMPDIR);
+  const insertedSocket = callerSocket();
   let result;
   try {
     result = db.transaction(() => {
@@ -918,8 +918,8 @@ async function cmdLead(argv: string[]): Promise<void> {
           createdPane = true;
         } else {
 
-          const firstPane = tmux("list-panes", "-t", foundWindow, "-F", "#{pane_id}").split("\n")[0];
-          leadPane = tmux(
+          const firstPane = listPaneIds(foundWindow).split("\n")[0];
+          leadPane = splitPane({ argv: [
             "split-window",
             "-b",
             ...(detach ? ["-d"] : []),
@@ -932,7 +932,7 @@ async function cmdLead(argv: string[]): Promise<void> {
             project.path,
             ...envFlags,
             launchCommand,
-          );
+          ] }).target;
           relayoutAfterPaneLeft(foundWindow);
           leadWindow = foundWindow;
           createdPane = true;
@@ -964,7 +964,7 @@ async function cmdLead(argv: string[]): Promise<void> {
       if (createdPane) {
         try {
           waitForPaneEstablished(leadPane);
-          tmux("kill-pane", "-t", leadPane);
+          killPane(leadPane);
         } catch {
 
         }
@@ -998,7 +998,7 @@ async function cmdLead(argv: string[]): Promise<void> {
           )
           .run(
             leadPane,
-            tmuxSocketPath(process.env.TMUX, process.env.TMUX_TMPDIR),
+            callerSocket(),
             recordedPanePid,
             recordedCommand,
             recordedCodexHome,
@@ -1786,16 +1786,16 @@ function cmdAttach(argv: string[]): void {
     const started = ensureSession(session, project.path, { bare: true });
     if (started.created) {
       configureHiveWindow(started.window, true, project.id);
-      tmux("rename-window", "-t", started.window, project.name);
+      renameWindow(started.window, project.name);
       return started.window;
     }
     const found = findProjectWindow(session, project.id);
     if (found) return found;
 
-    const created = tmux(
+    const created = createBareWindow([
       "new-window", "-P", "-F", "#{session_name}:#{window_id}",
       "-t", `=${session}`, "-n", project.name, "-c", project.path,
-    );
+    ]);
     configureHiveWindow(created, true, project.id);
     return created;
   });
@@ -2029,7 +2029,7 @@ function cmdShow(argv: string[]): void {
       if (!windows.project) return `${name}: this project has no window to show it beside yet; run hive first`;
       if (paneVisibility(target, windows) === "shown") return `${name}: already shown`;
 
-      tmux("join-pane", "-h", "-d", "-s", target, "-t", windows.project);
+      joinPane(target, windows.project, true);
       applyLayout(windows.project, windowLayout(windows.project) ?? config.layout ?? DEFAULT_LAYOUT);
       setPaneTitle(target, shownPaneTitle(project.name, name));
       return `${name}: shown`;
@@ -2054,7 +2054,7 @@ function cmdHide(argv: string[]): void {
       if (where === "hidden") return `${name}: already hidden`;
 
       if (windows.processes) {
-        tmux("join-pane", "-d", "-s", target, "-t", windows.processes);
+        joinPane(target, windows.processes);
         applyLayout(windows.processes, PROCESSES_LAYOUT);
       } else if (where === "shown" && paneIsAloneInWindow(target) !== false) {
 
@@ -2065,9 +2065,9 @@ function cmdHide(argv: string[]): void {
           "start the lead (hive) first, then hide it"
         );
       } else {
-        const created = tmux(
-          "break-pane", "-d", "-P", "-F", "#{session_name}:#{window_id}",
-          "-s", target, "-n", processesWindowName(project.name),
+        const created = breakPane(
+          target,
+          processesWindowName(project.name),
         );
         makeProcessesWindow(created, project.id);
       }
@@ -2145,14 +2145,14 @@ function cmdLayout(argv: string[]): void {
         continue;
       }
 
-      tmux("join-pane", "-d", "-s", worker.tmux_target, "-t", windows.project);
+      joinPane(worker.tmux_target, windows.project);
       sourceWindows.add(source);
       moved.push({ name: worker.name, pane: worker.tmux_target });
     }
 
-    const leadPanes = tmux("list-panes", "-t", windows.project, "-F", "#{pane_id}").split("\n").filter(Boolean);
+    const leadPanes = listPaneIds(windows.project).split("\n").filter(Boolean);
     if (leadPanes[0] !== lead.tmux_target) {
-      tmux("swap-pane", "-s", lead.tmux_target, "-t", leadPanes[0]);
+      swapPane(lead.tmux_target, leadPanes[0]);
     }
     applyLayout(windows.project, layout);
     const layoutApplied = windowLayout(windows.project) === layout;
@@ -2167,7 +2167,7 @@ function cmdLayout(argv: string[]): void {
     for (const source of sourceWindows) {
       let remaining: string[];
       try {
-        remaining = tmux("list-panes", "-t", source, "-F", "#{pane_id}").split("\n").filter(Boolean);
+        remaining = listPaneIds(source).split("\n").filter(Boolean);
       } catch (error) {
         if (tmuxSaysNothingThere(error)) continue;
         throw error;
@@ -3112,7 +3112,7 @@ function cmdDoctor(argv: string[]): void {
   check("tmux", () => {
     let version: string;
     try {
-      version = execFileSync("tmux", ["-V"], { encoding: "utf8" }).trim();
+      version = terminalVersion();
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") throw new Error(TMUX_NOT_INSTALLED_MESSAGE);
       throw e;
@@ -3122,7 +3122,7 @@ function cmdDoctor(argv: string[]): void {
     return override === null ? version : `${version} (HIVE_TMUX_TIMEOUT_MS=${override}ms override; testing only)`;
   });
   try {
-    const serverEnv = tmux("show-environment", "-g", "NO_COLOR");
+    const serverEnv = serverEnvironment("NO_COLOR");
     if (serverEnv.startsWith("NO_COLOR=")) {
       warn(
         "tmux NO_COLOR",
@@ -3315,7 +3315,7 @@ function cmdDoctor(argv: string[]): void {
 
       if (untrustedTmuxServer()) {
         throw new Error(
-          `TMUX_TMPDIR points at a private tmux server (${process.env.TMUX_TMPDIR}) while hive is ` +
+          `TMUX_TMPDIR points at a private tmux server (${callerTmuxTmpDir()}) while hive is ` +
             `using its default store at ${DEFAULT_DATA_DIR}. Nothing was swept, deliberately: the ` +
             "agents in that store live on the shared tmux server, so this one would report every " +
             "single one of them as dead. Unset TMUX_TMPDIR, or set HIVE_DATA_DIR to a scratch store " +
@@ -3379,7 +3379,7 @@ function cmdDoctor(argv: string[]): void {
       warn(
         `${row.kind} ${row.name}`,
         `recorded on tmux socket ${row.tmux_socket}, but this process would use ` +
-          `${tmuxSocketPath(process.env.TMUX, process.env.TMUX_TMPDIR)}. The janitor cannot judge this row ` +
+          `${callerSocket()}. The janitor cannot judge this row ` +
           "from here, so it stays 'running' - and its name stays taken - until it is probed from wherever " +
           "that socket actually lives.",
       );
@@ -3538,7 +3538,7 @@ function cmdDoctor(argv: string[]): void {
   const hiveSessions = (): { sessions: string[]; answered: boolean } => {
     try {
       return {
-        sessions: tmux("ls", "-F", "#{session_name}")
+        sessions: listSessionNames()
           .trim()
           .split("\n")
           .filter((s) => s.startsWith(SESSION_PREFIX)),
@@ -3600,7 +3600,7 @@ function cmdDoctor(argv: string[]): void {
   for (const name of allSessions.filter(isViewSessionName)) {
     let hasClient: boolean;
     try {
-      hasClient = tmux("list-clients", "-t", `=${name}`).trim() !== "";
+      hasClient = sessionClients(name).trim() !== "";
     } catch {
 
       continue;
@@ -3624,7 +3624,7 @@ function cmdDoctor(argv: string[]): void {
     const { mode } = loaded.attach;
     if (mode === "raw") {
       try {
-        const owned = tmux("list-windows", "-a", "-F", "#{session_name}:#{window_id}\t#{@hive-owned}")
+        const owned = listWindowOwnership()
           .trim()
           .split("\n")
           .map((row) => row.split("\t"))
@@ -3634,9 +3634,9 @@ function cmdDoctor(argv: string[]): void {
             return target.startsWith(SESSION_PREFIX) && marker === "1" && !isViewSessionName(sess);
           });
         for (const [target] of owned) {
-          const pane = tmux("list-panes", "-t", target, "-F", "#{pane_id}").trim().split("\n")[0];
+          const pane = listPaneIds(target).trim().split("\n")[0];
           const option = (scope: "-p" | "-w", optionName: string): string =>
-            tmux("show-options", scope, "-A", "-v", "-t", scope === "-p" ? pane : target, optionName).trim();
+            showOption(scope, scope === "-p" ? pane : target, optionName).trim();
           info(
             `tmux window ${target}`,
             `allow-passthrough ${option("-p", "allow-passthrough")}; ` +
@@ -4204,7 +4204,7 @@ function activeHiveUsage(): string[] {
 
   try {
 
-    const sessions = tmux("ls", "-F", "#{session_name}")
+    const sessions = listSessionNames()
       .trim()
       .split("\n")
 
