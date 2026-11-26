@@ -144,6 +144,7 @@ import {
   foreignSocket,
   liveTargets,
   paneInCopyMode,
+  programStatusBlocks,
   rowAlive,
   rowAliveProbe,
   rowLiveProbe,
@@ -2309,7 +2310,7 @@ function deliverable(timer: TimerRow, snapshot: AliveSnapshot | null, choices: C
     holdTimer(timer, HELD_REASON_PANE_CAPTURE_UNKNOWN);
     return { ok: false };
   }
-  if (dialog === true) {
+  if (dialog === true || programStatusBlocks(timer.deliver_pane, snapshot)) {
 
     noteModalHold(timer, snapshot);
     return { ok: false };
