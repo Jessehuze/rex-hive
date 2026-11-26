@@ -9,7 +9,9 @@ import { ensureLeadHooksFile } from "./hooks.js";
 import { appendClaudeLeadArgs, crewPluginDir, isTrusted, leadIdentityEnv, renderLeadPosture } from "./leadLaunch.js";
 import { leadSidebarEnabled, loadProjectYml, quietMessagingEnabled } from "./projectYml.js";
 import { buildEnvFlags } from "./spawn.js";
-import { shellQuote, TmuxError, TmuxTimeoutError } from "./tmux.js"; import { callerPane, panePidForRecord, respawnPane, rowOwnership, terminalOfRow } from "./terminal.js"; import { rexRefusal } from "./terminal/rex.js";
+import { shellQuote, TmuxError, TmuxTimeoutError } from "./tmux.js"; import { callerPane, isRexTarget, panePidForRecord, respawnPane, rowOwnership, terminalOfRow } from "./terminal.js";
+import { RexTimeoutError } from "./rexCli.js";
+import { ACTIVE_TIMER_WHERE, socketAwaitingWhere } from "./wakeSql.js";
 import {
   automationBlocker,
   armManualHandoff,
@@ -34,6 +36,7 @@ import { readTurnCount } from "./turnCount.js";
 import { harnessFor } from "./harnesses.js";
 
 const POLL_MS = 1_000;
+const REX_RECORD_WAIT_MS = 15_000;
 const HANDOFF_PAD_SOFT_CAP = 8_000;
 
 function flags(argv: string[], names: readonly string[], required: readonly string[] = names): Record<string, string> | string {
@@ -90,7 +93,6 @@ export async function cmdLeadHandoff(argv: string[]): Promise<number> {
   const actor = process.env.HIVE_AGENT_ID ?? "";
   const lead = process.env.HIVE_LEAD === "1" ? runningLeadByActor(actor) : undefined;
   if (lead === undefined) return refuse("only a running lead can hand itself off");
-  if (terminalOfRow(lead) === "rex") return refuse(rexRefusal("lead handoff"));
   if (callerPane() !== lead.tmux_target || rowOwnership(lead) !== "live") {
     return refuse("this is not running in the lead's own recorded pane");
   }
@@ -295,6 +297,7 @@ async function graceLoop(argv: string[]): Promise<number> {
       return 0;
     }
     if (!casHandoff(row.id, ["grace"], { state: "respawning", owner_pid: process.pid, respawn_claimed_at: nowSql() }, { attempt, owner_token: token })) return 0;
+    let recorded = false;
     for (let respawnAttempt = 1; respawnAttempt <= 3; respawnAttempt++) {
       if (respawnAttempt > 1) {
         await sleepMs(200);
@@ -302,11 +305,24 @@ async function graceLoop(argv: string[]): Promise<number> {
         if (current?.state !== "respawning" || current.attempt !== attempt || current.owner_token !== token) return 0;
       }
       try {
-        row.pane_target = respawnPane({ target: row.pane_target, cwd: lead!.path, env: launch.env, command: launch.launch }).target;
+        const predecessor = row.pane_target;
+        const rex = terminalOfRow(lead!) === "rex"
+          ? {
+              projectId: lead!.project_id,
+              projectName: lead!.name,
+              record: (placed: { target: string; pid: string }) => {
+                recordRexSuccessor.immediate(row, lead!, attempt, token, placed);
+                recorded = true;
+              },
+              orphaned: (detail: string) =>
+                console.error(`hive lead-handoff-grace: handoff #${row.id}: the predecessor block ${predecessor} could not be closed and is left running with no row: ${detail}`),
+            }
+          : undefined;
+        row.pane_target = respawnPane({ target: row.pane_target, cwd: lead!.path, env: launch.env, command: launch.launch, rex }).target;
         return 0;
       } catch (e) {
         const detail = e instanceof Error ? e.message : String(e);
-        if (e instanceof TmuxTimeoutError) {
+        if (e instanceof TmuxTimeoutError || (e instanceof RexTimeoutError && recorded)) {
           casHandoff(row.id, ["respawning"], { state: "ambiguous", failure: `respawn-pane timed out; the pane's owner is unknown: ${detail}` }, { attempt, owner_token: token });
         } else {
           const enxio = e instanceof TmuxError && e.stderr === "respawn pane failed: fork failed: Device not configured";
@@ -320,15 +336,37 @@ async function graceLoop(argv: string[]): Promise<number> {
   }
 }
 
+const recordRexSuccessor = db.transaction((row: HandoffRow, lead: RunningLead, attempt: number, token: string, placed: { target: string; pid: string }): void => {
+  if (placed.pid === "") throw new Error("Rex did not report a process id for the successor block");
+  const moved = db
+    .prepare("UPDATE agents SET tmux_target = ?, pane_pid = ? WHERE id = ? AND kind = 'lead' AND status = 'running' AND tmux_target = ? AND pane_pid = ?")
+    .run(placed.target, placed.pid, lead.id, row.pane_target, row.predecessor_pane_pid).changes;
+  if (moved !== 1) throw new Error("the lead row moved before the successor block could be recorded");
+  if (!casHandoff(row.id, ["respawning"], { pane_target: placed.target }, { attempt, owner_token: token })) throw new Error("the handoff changed during the respawn");
+  db.prepare(
+    `UPDATE wakes SET deliver_pane = ? WHERE ((${ACTIVE_TIMER_WHERE}) OR (${socketAwaitingWhere()})) AND deliver_actor = ? AND deliver_pane = ?`,
+  ).run(placed.target, lead.actor_id, row.pane_target);
+});
+
+async function recordedSuccessor(id: number, attempt: number, token: string, pane: string): Promise<HandoffRow | null> {
+  const deadline = Date.now() + REX_RECORD_WAIT_MS;
+  for (;;) {
+    const row = readHandoff(id);
+    if (row === null || (row.state !== "respawning" && row.state !== "ambiguous") || row.attempt !== attempt || row.owner_token !== token) return row;
+    if (row.pane_target === pane || Date.now() >= deadline) return row;
+    await sleepMs(50);
+  }
+}
+
 // `hive lead-handoff-start`: runs in the respawned pane before Claude. It publishes the successor's
 // pid on the same lead row by CAS against the predecessor, and only then lets the shell exec Claude.
 export async function runHandoffStart(argv: string[]): Promise<number> {
   if (rejectUnknownFlag(argv, "lead-handoff-start", ["request", "attempt", "token"], "--request <id>, --attempt <n>, --token <token>")) return 1;
   const parsed = flags(argv, ["request", "attempt", "token"]);
+  const failBootstrap = (id: number, why: string, where: Partial<Record<keyof HandoffRow, string | number | null>> = {}): boolean =>
+    casHandoff(id, ["respawning", "ambiguous"], { state: "failed", failure: `the successor bootstrap refused: ${why}`, owner_token: null, owner_pid: null }, where);
   const refuse = (why: string, id?: number): number => {
-    if (id !== undefined) {
-      casHandoff(id, ["respawning", "ambiguous"], { state: "failed", failure: `the successor bootstrap refused: ${why}`, owner_token: null, owner_pid: null });
-    }
+    if (id !== undefined) failBootstrap(id, why);
     console.error(`hive lead-handoff-start: ${why}. The handoff pad stays active; run hive lead to start a lead.`);
     return 1;
   };
@@ -336,12 +374,20 @@ export async function runHandoffStart(argv: string[]): Promise<number> {
   const id = intFlag(parsed.request);
   const attempt = intFlag(parsed.attempt);
   if (id === null || attempt === null) return refuse("bad arguments");
-  const row = readHandoff(id);
+  const pane = callerPane();
+  let row = isRexTarget(pane) ? await recordedSuccessor(id, attempt, parsed.token, pane) : readHandoff(id);
   if (row === null || (row.state !== "respawning" && row.state !== "ambiguous") || row.attempt !== attempt || row.owner_token !== parsed.token) {
     return refuse("this bootstrap does not own a respawning handoff");
   }
-  const pane = callerPane();
-  if (pane !== row.pane_target) return refuse("this is not the pane the handoff respawned", id);
+  if (pane !== row.pane_target && !isRexTarget(pane)) return refuse("this is not the pane the handoff respawned", id);
+  if (pane !== row.pane_target) {
+    const why = "this is not the pane the handoff respawned";
+    if (failBootstrap(id, why, { pane_target: row.pane_target })) return refuse(why);
+    row = readHandoff(id);
+    if (row === null || (row.state !== "respawning" && row.state !== "ambiguous") || row.attempt !== attempt || row.owner_token !== parsed.token || row.pane_target !== pane) {
+      return refuse(why);
+    }
+  }
   const pid = panePidForRecord(pane);
   if (pid === "" || pid !== String(process.ppid)) return refuse("the pane's process id does not match this bootstrap's shell", id);
   const publish = db.transaction((): boolean => {
@@ -350,7 +396,7 @@ export async function runHandoffStart(argv: string[]): Promise<number> {
         `UPDATE agents SET pane_pid = ?, claude_messaging_socket = '', claude_messaging_pane_pid = ''
           WHERE id = ? AND kind = 'lead' AND status = 'running' AND tmux_target = ? AND pane_pid = ?`,
       )
-      .run(pid, row.lead_agent_id, row.pane_target, row.predecessor_pane_pid).changes;
+      .run(pid, row.lead_agent_id, row.pane_target, isRexTarget(pane) ? pid : row.predecessor_pane_pid).changes;
     if (moved !== 1) return false;
     const started = casHandoff(
       id,

@@ -201,20 +201,6 @@ describe("Rex leads", () => {
     const block = fake.state().blocks[lead.tmux_target];
     assert.equal(fake.state().windows.find((w) => w.window_id === block.window_id).label, "queen");
   });
-
-  it("lead-handoff under a Rex lead refuses by name", async () => {
-    const dir = freshProject("rex-refusals");
-    const { project } = await startLead(dir);
-    const lead = leadRow(db, project.id);
-    const handoff = await runCli(["lead-handoff", "--pad", "1", "--revision", "1"], {
-      cwd: dir,
-      dataDir: dirs.dataDir,
-      tmp: dirs.tmp,
-      env: withClaude({ HIVE_AGENT_ID: lead.actor_id, HIVE_LEAD: "1", REX_BLOCK: lead.tmux_target }),
-    });
-    assert.equal(handoff.code, 1);
-    assert.match(handoff.stderr, /lead handoff is not available under the Rex terminal/);
-  });
 });
 
 describe("Rex workers", () => {

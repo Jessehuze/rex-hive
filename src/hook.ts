@@ -349,6 +349,12 @@ try {
   if (actorId) {
     const event = process.argv[2] ?? "";
     const hookPayload = readPayload();
+    if (process.env.HIVE_LEAD === "1") {
+      const lead = db
+        .prepare("SELECT tmux_target, tmux_socket, pane_pid, command FROM agents WHERE actor_id = ? AND kind = 'lead' AND status = 'running' AND tmux_target LIKE 'block:%'")
+        .get(actorId) as { tmux_target: string; tmux_socket: string; pane_pid: string; command: string } | undefined;
+      if (lead !== undefined && (await import("./terminal.js")).callerIsOtherOwnedBlock(lead)) process.exit(0);
+    }
     if (event === "stop_failure") {
       try {
         const { observeClaudeStopFailure } = await import("./usageLimit.js");

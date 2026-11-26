@@ -358,6 +358,21 @@ describe("worker visibility on Rex", () => {
     assert.deepEqual(apiCalls(before).filter((c) => MUTATING.includes(c.method)), []);
   });
 
+  it("a hidden worker's block is owned, never an unowned leftover of the lead's handoff", async () => {
+    const dir = freshProject("vis-unowned");
+    const { project, mcp } = await startLead(dir);
+    writeFileSync(join(dir, "hive.yml"), "workers: hidden\n");
+    const spawned = await spawn(mcp, "w-owned", { placement: "split" });
+    await closeClients();
+    assert.equal(locate(spawned.tmux_target).layer.state, "minimized");
+    const { rexUnownedBlocks } = await import("../dist/terminal/rex.js");
+    const unowned = () => (rexUnownedBlocks(REX_ADDR) ?? []).map((b) => b.block);
+    assert.equal(unowned().includes(spawned.tmux_target), false, "a running hidden worker's float is owned");
+    const row = workerRow(project.id, "w-owned");
+    db.prepare("UPDATE agents SET status = 'closed' WHERE id = ?").run(row.id);
+    assert.equal(unowned().includes(spawned.tmux_target), true, "the same float with its row closed does read unowned, so the check can fail");
+  });
+
   it("wakes deliver to a hidden worker", async () => {
     const dir = freshProject("vis-wake");
     const { mcp } = await startLead(dir);
