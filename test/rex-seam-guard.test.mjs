@@ -18,6 +18,29 @@ const FACADE_NAMES = [
 
 const IMPORT_ALLOWLIST = [];
 
+const PURE_TMUX_EXPORTS = [
+  "AliveSnapshot", "DEFAULT_LAYOUT", "InputBoxSnapshot", "InputBoxState", "Liveness", "ORPHAN_MIN_AGE_MS",
+  "OrphanScratchServers", "OwnedWindow", "PROCESSES_LAYOUT", "PaneVisibility", "ProjectWindows",
+  "RAW_ATTACH_TMUX_CONFIG", "RowOwnership", "RowPaneIdentity", "SESSION_PREFIX", "TEXT_ALLOWED_CONTROL_CHARS",
+  "TMUX_DOC", "TMUX_NOT_INSTALLED_MESSAGE", "TmuxError", "TmuxTimeoutError", "TrailerView", "WINDOW_LAYOUTS",
+  "WindowLayout", "controlModeFor", "describePaneChoice", "findUnsafeControlChar", "isPaneTarget",
+  "isViewSessionName", "isWindowLayout", "maskChoiceMarker", "observationFailed", "orphansWorthWarningAbout",
+  "ownershipLiveness", "processesPaneTitle", "processesWindowName", "renderAttachCommand", "renderTrailerView",
+  "retainOnExitArgs", "sanitizeEventForDisplay", "sanitizeTail", "sessionName", "shellQuote", "shownPaneTitle",
+  "sleep", "stripControlBytes", "tailCaptureLines", "tmuxNotInstalled", "tmuxSaysNothingThere",
+  "tmuxTimeoutOverride", "windowTitle",
+];
+
+const PENDING_FACADE_NAMES = [
+  "adoptableWindow", "appendGlobalHook", "applyLayout", "claimInitialWindow", "codexPaneHasInputBox",
+  "configureHiveWindow", "createWindow", "crossServerRefusal", "ensureAttached", "ensureSession",
+  "findProcessesWindow", "findProjectWindow", "globalHooks", "holdsHumanInput", "listOwnedWindows",
+  "makeProcessesWindow", "orphanScratchServers", "paneEnvPath", "paneHasInputBox", "paneIsAloneInWindow",
+  "paneReissued", "paneVisibility", "paneWindow", "projectWindows", "replaceGlobalHooks", "resolveAttachTarget",
+  "resolveInTmuxTarget", "setPaneTitle", "tmux", "tmuxSocketPath", "tmuxWithClientPath", "untrustedTmuxServer",
+  "windowLayout", "windowOwner",
+];
+
 const PENDING_TASK_2 = [
   "src/cli.ts",
   "src/spawn.ts",
@@ -39,19 +62,31 @@ function listTs(dir) {
 
 const isFacadeFile = (rel) => rel === "src/terminal.ts" || rel.startsWith("src/terminal/");
 
-function tmuxImportViolations(rel, text) {
-  if (isFacadeFile(rel)) return [];
-  const found = [];
-  const staticImport = /import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+"(?:\.\.?\/)+tmux\.js"/g;
-  const dynamicImport = /const\s+\{([^}]*)\}\s*=\s*await\s+import\("(?:\.\.?\/)+tmux\.js"\)/g;
-  for (const re of [staticImport, dynamicImport]) {
+const TMUX_SPECIFIER = /"(?:\.\.?\/)+tmux\.js"/g;
+const STATIC_IMPORT = /import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+"(?:\.\.?\/)+tmux\.js"/g;
+const DYNAMIC_IMPORT = /const\s+\{([^}]*)\}\s*=\s*await\s+import\("(?:\.\.?\/)+tmux\.js"\)/g;
+
+function importedTmuxNames(text) {
+  const names = [];
+  let plain = 0;
+  for (const re of [STATIC_IMPORT, DYNAMIC_IMPORT]) {
     for (const match of text.matchAll(re)) {
+      plain += 1;
       for (const raw of match[1].split(",")) {
         const name = raw.trim().replace(/^type\s+/, "").split(/\s+as\s+|\s*:\s*/)[0].trim();
-        if (FACADE_NAMES.includes(name)) found.push(`${rel}: ${name}`);
+        if (name) names.push(name);
       }
     }
   }
+  const unsupportedForms = [...text.matchAll(TMUX_SPECIFIER)].length - plain;
+  return { names, unsupportedForms };
+}
+
+function tmuxImportViolations(rel, text) {
+  if (isFacadeFile(rel)) return [];
+  const { names, unsupportedForms } = importedTmuxNames(text);
+  const found = names.filter((name) => !PURE_TMUX_EXPORTS.includes(name)).map((name) => `${rel}: ${name}`);
+  if (unsupportedForms > 0) found.push(`${rel}: unsupported tmux.js import form`);
   return found;
 }
 
@@ -67,8 +102,14 @@ describe("rex seam guard", () => {
     const violations = sources
       .filter(({ rel }) => !IMPORT_ALLOWLIST.includes(rel))
       .flatMap(({ rel, text }) => tmuxImportViolations(rel, text));
-    const files = [...new Set(violations.map((v) => v.split(":")[0]))];
-    assert.deepEqual(files, [], `import these from the terminal facade:\n${violations.join("\n")}`);
+    const unlisted = violations.filter((v) => !PENDING_FACADE_NAMES.includes(v.split(": ")[1]));
+    assert.deepEqual(unlisted, [], "import these from the terminal facade or list them as pure or pending");
+  });
+
+  it("every pending facade name is still imported directly from tmux.js and is not pure", () => {
+    const imported = new Set(sources.flatMap(({ rel, text }) => (isFacadeFile(rel) ? [] : importedTmuxNames(text).names)));
+    assert.deepEqual(PENDING_FACADE_NAMES.filter((n) => !imported.has(n)), []);
+    assert.deepEqual(PENDING_FACADE_NAMES.filter((n) => PURE_TMUX_EXPORTS.includes(n)), []);
   });
 
   it("only tmux.ts, terminal files and rexCli.ts execute tmux or rex", () => {
@@ -94,6 +135,17 @@ describe("rex seam guard", () => {
     assert.equal(tmuxImportViolations("src/x.ts", planted).length, 1);
     assert.equal(tmuxImportViolations("src/terminal.ts", planted).length, 0);
     assert.equal(tmuxImportViolations("src/x.ts", 'import { shellQuote } from "./tmux.js";').length, 0);
+    assert.equal(tmuxImportViolations("src/x.ts", 'import { brandNewPaneThing } from "./tmux.js";').length, 1);
+    for (const form of [
+      'export { shellQuote } from "./tmux.js";',
+      'import * as t from "./tmux.js";',
+      'import t from "./tmux.js";',
+      'import t, { shellQuote } from "./tmux.js";',
+      'const s = (await import("./tmux.js")).shellQuote;',
+      'const t = await import("./tmux.js");',
+    ]) {
+      assert.equal(tmuxImportViolations("src/x.ts", form).length, 1, form);
+    }
     assert.equal(execViolations("src/x.ts", 'execFileSync("rex", [])').length, 1);
   });
 });
