@@ -13,6 +13,7 @@ import {
   rexProbe,
   rexReapExited,
   rexReapPending,
+  rexReleaseInUse,
   rexRowProbe,
   rexSendKey,
   rexSendKeys,
@@ -328,7 +329,9 @@ export function reapExitedBlock(row: { id: number; project_id: number; tmux_targ
 }
 
 export function reapPendingBlocks(snapshot: AliveSnapshot | null): void {
-  if (rexActive()) rexReapPending(rexOf(snapshot));
+  if (!rexActive()) return;
+  rexReapPending(rexOf(snapshot));
+  rexReleaseInUse();
 }
 
 export function targetLiveProbe(target: string): PaneProbe {
