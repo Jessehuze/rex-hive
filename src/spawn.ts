@@ -42,7 +42,7 @@ import {
   waitForPaneEstablished,
   rowOwnership,
 } from "./terminal.js";
-import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexRefuseQuickExit } from "./terminal/rex.js";
+import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexForgetShownAs, rexRefuseQuickExit, rexRememberShownAs } from "./terminal/rex.js";
 
 export function withWindowClaim<T>(claim: () => T): T {
   if (db.inTransaction) {
@@ -268,14 +268,20 @@ export function rexLeadFor(projectId: number, parentActor: string): { tmux_targe
 
 type PlacedPane = {
   target: string; pid: string; landedInProjectId: number | null; layoutApplied: boolean; inProcessesWindow: boolean; socket?: string;
+  hidden?: HiddenOutcome;
 };
 
+export type HiddenOutcome = "rex" | "tmux" | null;
+
+const workersHidden = (projectPath: string): boolean => loadProjectYml(projectPath).config?.workers === "hidden";
+
 function placeRexPane(
-  spec: Pick<LaunchSpec, "projectId" | "projectName" | "name" | "cwd" | "placement" | "retainOnExit">,
+  spec: Pick<LaunchSpec, "projectId" | "projectName" | "name" | "cwd" | "placement" | "retainOnExit"> & { hidden?: boolean },
   lead: { tmux_target: string },
   envFlags: string[],
   commandString: string,
 ): PlacedPane {
+  const hidden = spec.placement === "processes" || spec.hidden === true;
   const placed = withWindowClaim(() => rexCreatePane({
     projectId: spec.projectId,
     projectName: spec.projectName,
@@ -283,11 +289,15 @@ function placeRexPane(
     cwd: spec.cwd,
     env: envFromFlags(envFlags),
     argv: commandArgv(commandString),
-    placement: spec.placement === "processes" ? "hidden" : spec.placement,
+    placement: hidden ? "hidden" : spec.placement as "split" | "window",
     beside: lead.tmux_target,
     retainOnExit: spec.retainOnExit ?? false,
   }));
-  return { target: placed.target, pid: placed.pid, socket: placed.socket, landedInProjectId: null, layoutApplied: false, inProcessesWindow: spec.placement === "processes" };
+  if (hidden && spec.placement !== "processes") rexRememberShownAs(spec.projectId, placed.target, spec.placement as "split" | "window");
+  return {
+    target: placed.target, pid: placed.pid, socket: placed.socket, landedInProjectId: null, layoutApplied: false,
+    inProcessesWindow: spec.placement === "processes", hidden: spec.hidden === true ? "rex" : null,
+  };
 }
 
 function placeAgentPane(
@@ -303,7 +313,7 @@ function placeAgentPane(
     | "layout"
     | "parentActor"
     | "retainOnExit"
-  >,
+  > & { hidden?: boolean },
   envFlags: string[],
   commandString: string,
   title: string,
@@ -375,7 +385,7 @@ function placeAgentPane(
     if (spec.retainOnExit) onRetainArmed(made.window);
     return made.pane;
   });
-  return { target, pid, landedInProjectId, layoutApplied, inProcessesWindow };
+  return { target, pid, landedInProjectId, layoutApplied, inProcessesWindow, hidden: spec.hidden === true ? "tmux" : null };
 }
 
 export function launchAgent(spec: LaunchSpec): {
@@ -386,6 +396,7 @@ export function launchAgent(spec: LaunchSpec): {
   layoutApplied: boolean;
   inProcessesWindow: boolean;
   retainedWindow: string | null;
+  hidden: HiddenOutcome;
 } {
 
   if (untrustedTmuxServer()) throw crossServerRefusal("spawn");
@@ -444,7 +455,8 @@ export function launchAgent(spec: LaunchSpec): {
 
     const title = windowTitle(spec.projectName, spec.name);
 
-    const placed = placeAgentPane(session, spec, envFlags, commandString, title, (window) => {
+    const launch = { ...spec, hidden: spec.kind === "agent" && workersHidden(spec.projectPath) };
+    const placed = placeAgentPane(session, launch, envFlags, commandString, title, (window) => {
       retainedWindow = window;
     });
     const { target, landedInProjectId, layoutApplied, inProcessesWindow } = placed;
@@ -456,7 +468,7 @@ export function launchAgent(spec: LaunchSpec): {
       discardOrphanedPane(target, placed.socket);
       throw paneRacedRetirement(agentId);
     }
-    return { agentId, actorId, target, landedInProjectId, layoutApplied, inProcessesWindow, retainedWindow };
+    return { agentId, actorId, target, landedInProjectId, layoutApplied, inProcessesWindow, retainedWindow, hidden: placed.hidden ?? null };
   } catch (e) {
     if (retainedWindow) setRemainOnExit(retainedWindow, false);
     if (paneUp) throw e;
@@ -570,7 +582,7 @@ export function resumeAgent(
     });
     const session = sessionName();
     const title = windowTitle(spec.projectName, spec.name);
-    const placed = placeAgentPane(session, spec, envFlags, spec.commandString, title);
+    const placed = placeAgentPane(session, { ...spec, hidden: workersHidden(spec.projectPath) }, envFlags, spec.commandString, title);
     const { target, landedInProjectId } = placed;
     const pid = createdPidOrDiscard(target, placed.pid, placed.socket);
     refuseIfExitedImmediately(target, false, placed.socket);
@@ -657,6 +669,7 @@ export function parkAgentRowWithLeases(
       | { parked_at: string }
       | undefined;
     if (!row) return { released_leases: [] };
+    forgetShownAs(agentId);
     return { parked_at: row.parked_at, released_leases: releaseWorkerLeases(agentId) };
   })();
 }
@@ -751,6 +764,11 @@ export function reapCodexHomeForClosedAgent(agentId: number, codexHome: string):
   }).immediate();
 }
 
+function forgetShownAs(agentId: number): void {
+  const row = db.prepare("SELECT project_id, tmux_target FROM agents WHERE id = ?").get(agentId) as { project_id: number; tmux_target: string } | undefined;
+  if (row && isRexTarget(row.tmux_target)) rexForgetShownAs(row.project_id, row.tmux_target);
+}
+
 export function closeAgentRow(agentId: number, expected?: RowPaneIdentity): boolean {
   return closeAgentRowWithLeases(agentId, expected).closed;
 }
@@ -775,6 +793,7 @@ export function closeAgentRowWithLeases(
             )
             .run(agentId, expected.tmux_target, expected.tmux_socket, expected.pane_pid);
     if (info.changes === 0) return { closed: false, released_leases: [] };
+    forgetShownAs(agentId);
     removeReadOnlyTmpDirForAgent(agentId);
     if (options.releaseLeases === false) cancelWorkerLeaseWaits(agentId);
     return {

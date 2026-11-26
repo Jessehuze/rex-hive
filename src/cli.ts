@@ -205,7 +205,7 @@ import {
   waitForPaneEstablished,
   windowLayout,
 } from "./terminal.js";
-import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexFocus, rexHideProcess, rexLayoutProject, rexProjectLead, rexRefuseQuickExit, rexShowProcess, rexVisibility } from "./terminal/rex.js";
+import { commandArgv, envFromFlags, rexClose, rexCannotTell, rexCreatePane, rexFocus, rexHideBlock, rexLayoutProject, rexPeekBlock, rexProjectLead, rexRefuseQuickExit, rexShowBlock, rexShownAs, rexVisibility } from "./terminal/rex.js";
 import { collectCrew, crewStoreProblem } from "./crew.js";
 import { resumeWorker, validateResumeWorker } from "./agentResume.js";
 import { markWorkerLost } from "./workerRecovery.js";
@@ -316,6 +316,12 @@ Usage:
   hive stop <process> [path]  stop one running process; --all stops every one
   hive show <process> [path]  move a running process's pane beside the lead
   hive hide <process> [path]  move it back into the <project>/processes window
+  hive show|hide <worker> [path] | --all [path]
+                             Rex only: hide floats a worker minimized in the
+                             lead's tab; show moves it back; --all covers every
+                             running worker and no process
+  hive peek <worker> [path]  Rex only: restore a hidden worker over the lead and
+                             focus it; hive hide minimizes it again
   hive layout               gather this project's live workers and restore its configured layout
   hive crew-restore [--dry-run] [--json]
                              resume this project's workers marked for crash recovery
@@ -1958,37 +1964,24 @@ function processNotDefined(config: ProjectYml | null, name: string): string {
 const CANNOT_TELL_WHERE = (name: string) =>
   `${name}: tmux could not be probed, so hive cannot tell where its pane is`;
 
-function resolveNamedProcess(
-  argv: string[],
-  verb: "show" | "hide",
-): { project: Project; name: string; config: ProjectYml; target: string } | null {
-  const parsed = parseArgs(argv, {});
-  rejectUnknownFlags(verb, parsed, "none");
+type VisibilityVerb = "show" | "hide" | "peek";
+type BlockRow = { name: string; tmux_target: string; tmux_socket: string; pane_pid: string };
+type VisibilityHit = { project: Project; name: string; config: ProjectYml | null; target: string; worker: boolean };
 
-  const name = parsed.positional[0];
-  if (!name) {
-    console.log(`Usage: hive ${verb} <process> [path]`);
-    process.exit(1);
-  }
-  const project = resolveProjectForWrite(`hive ${verb}`, parsed.positional[1]);
-  const { config, warnings } = loadProjectYml(project.path);
-  for (const w of warnings) console.log(`! ${w}`);
-  if (!config?.processes[name]) {
-    console.log(processNotDefined(config, name));
-    process.exit(1);
-  }
-  const row = db
+const WORKERS_NEED_REX = "hiding workers needs terminal: rex";
+
+function runningWorkerRows(projectId: number, name?: string): BlockRow[] {
+  return db
     .prepare(
-      "SELECT tmux_target, tmux_socket, pane_pid FROM agents WHERE project_id = ? AND name = ? AND kind = 'command' AND status = 'running'",
+      `SELECT name, tmux_target, tmux_socket, pane_pid FROM agents WHERE project_id = ? AND kind = 'agent' AND status = 'running'${name === undefined ? "" : " AND name = ?"} ORDER BY id`,
     )
-    .get(project.id, name) as { tmux_target: string; tmux_socket: string; pane_pid: string } | undefined;
-  if (!row) {
-    console.log(`${name}: not running (start with: hive start "${name}")`);
-    return null;
-  }
+    .all(...(name === undefined ? [projectId] : [projectId, name])) as BlockRow[];
+}
+
+function liveRowTarget(row: BlockRow, name: string, notRunning: string, cannotTell: string): string | null {
   const ownership = observeRowOwnership(row);
   if (ownership === "probe-failed") {
-    console.log(CANNOT_TELL_WHERE(name));
+    console.log(cannotTell);
     return null;
   }
   if (ownership === "unknown") {
@@ -1999,10 +1992,99 @@ function resolveNamedProcess(
   // A pane id alone is not an identity: tmux restarts them at %0 on a fresh server, so a stale
   // running row names whoever holds that id now.
   if (ownership !== "live") {
-    console.log(`${name}: not running (start with: hive start "${name}")`);
+    console.log(notRunning);
     return null;
   }
-  return { project, name, config, target: row.tmux_target };
+  return row.tmux_target;
+}
+
+function liveWorkerTarget(row: BlockRow): string | null {
+  if (!isRexTarget(row.tmux_target)) {
+    console.log(`${row.name}: ${WORKERS_NEED_REX}`);
+    process.exitCode = 1;
+    return null;
+  }
+  return liveRowTarget(row, row.name, `${row.name}: not running`, rexCannotTell(row.name));
+}
+
+function visibilityProject(parsed: ParsedArgs, verb: VisibilityVerb, pathAt: number): { project: Project; config: ProjectYml | null } {
+  const project = resolveProjectForWrite(`hive ${verb}`, parsed.positional[pathAt]);
+  const { config, warnings } = loadProjectYml(project.path);
+  for (const w of warnings) console.log(`! ${w}`);
+  return { project, config };
+}
+
+function resolveVisibilityTarget(parsed: ParsedArgs, verb: VisibilityVerb): VisibilityHit | null {
+  const name = parsed.positional[0];
+  if (!name) {
+    console.log(verb === "peek" ? "Usage: hive peek <worker> [path]" : `Usage: hive ${verb} <process|worker> [path] | hive ${verb} --all [path]`);
+    process.exit(1);
+  }
+  const { project, config } = visibilityProject(parsed, verb, 1);
+  const isProcess = verb !== "peek" && !!config?.processes[name];
+  const worker = runningWorkerRows(project.id, name)[0];
+  if (isProcess && worker) {
+    console.log(`ambiguous: ${name} is both a process and a worker`);
+    process.exit(1);
+  }
+  if (worker) {
+    const target = liveWorkerTarget(worker);
+    return target ? { project, name, config, target, worker: true } : null;
+  }
+  if (!isProcess) {
+    console.log(verb === "peek" ? `No running worker "${name}" in this project.` : processNotDefined(config, name));
+    process.exit(1);
+  }
+  const row = db
+    .prepare(
+      "SELECT name, tmux_target, tmux_socket, pane_pid FROM agents WHERE project_id = ? AND name = ? AND kind = 'command' AND status = 'running'",
+    )
+    .get(project.id, name) as BlockRow | undefined;
+  const notRunning = `${name}: not running (start with: hive start "${name}")`;
+  if (!row) {
+    console.log(notRunning);
+    return null;
+  }
+  const target = liveRowTarget(row, name, notRunning, CANNOT_TELL_WHERE(name));
+  return target ? { project, name, config, target, worker: false } : null;
+}
+
+const configuredPlacement = (config: ProjectYml | null): "split" | "window" =>
+  config?.placement ?? (process.env.HIVE_SPAWN_PLACEMENT === "window" ? "window" : "split");
+
+function showWorker(hit: VisibilityHit): string {
+  const placement = rexShownAs(hit.project.id, hit.target) ?? configuredPlacement(hit.config);
+  return withWindowClaim(() => rexShowBlock(hit.project.id, hit.name, hit.target, placement, `${hit.project.name}/${hit.name}`));
+}
+
+const hideWorker = (hit: VisibilityHit): string => withWindowClaim(() => rexHideBlock(hit.project.id, hit.name, hit.target, true));
+
+function visibilityCommand(argv: string[], verb: "show" | "hide"): VisibilityHit | null {
+  const parsed = parseArgs(argv, { flags: ["--all"] });
+  rejectUnknownFlags(verb, parsed, "--all");
+  if (!parsed.flags.has("--all")) return resolveVisibilityTarget(parsed, verb);
+  const { project, config } = visibilityProject(parsed, verb, 0);
+  const rows = runningWorkerRows(project.id);
+  if (rows.length === 0) console.log("No workers are running.");
+  for (const row of rows) {
+    const target = liveWorkerTarget(row);
+    if (!target) continue;
+    const hit = { project, name: row.name, config, target, worker: true };
+    try {
+      console.log(verb === "show" ? showWorker(hit) : hideWorker(hit));
+    } catch (e) {
+      console.log(`${row.name}: ${errorMessage(e)}`);
+      process.exitCode = 1;
+    }
+  }
+  return null;
+}
+
+function cmdPeek(argv: string[]): void {
+  const parsed = parseArgs(argv, {});
+  rejectUnknownFlags("peek", parsed, "none");
+  const hit = resolveVisibilityTarget(parsed, "peek");
+  if (hit) console.log(rexPeekBlock(hit.project.id, hit.name, hit.target));
 }
 
 const LEAD_PANE_EXITED_HOOK = "pane-exited";
@@ -2136,10 +2218,12 @@ function cmdStop(argv: string[]): void {
 }
 
 function cmdShow(argv: string[]): void {
-  const found = resolveNamedProcess(argv, "show");
+  const found = visibilityCommand(argv, "show");
   if (!found) return;
-  const { project, name, config, target } = found;
-  if (isRexTarget(target)) return console.log(withWindowClaim(() => rexShowProcess(project.id, name, target, config.placement ?? "split", `${project.name}/${name}`)));
+  if (found.worker) return console.log(showWorker(found));
+  const { project, name, target } = found;
+  const config = found.config!;
+  if (isRexTarget(target)) return console.log(withWindowClaim(() => rexShowBlock(project.id, name, target, config.placement ?? "split", `${project.name}/${name}`)));
   const session = sessionName();
 
   // Read the window inside the claim, never before it: tmux destroys a window when its last pane
@@ -2161,10 +2245,11 @@ function cmdShow(argv: string[]): void {
 }
 
 function cmdHide(argv: string[]): void {
-  const found = resolveNamedProcess(argv, "hide");
+  const found = visibilityCommand(argv, "hide");
   if (!found) return;
+  if (found.worker) return console.log(hideWorker(found));
   const { project, name, target } = found;
-  if (isRexTarget(target)) return console.log(withWindowClaim(() => rexHideProcess(project.id, name, target)));
+  if (isRexTarget(target)) return console.log(withWindowClaim(() => rexHideBlock(project.id, name, target)));
   const session = sessionName();
 
   // One claim over the whole decision: the group window comes and goes with its last pane, so both
@@ -4869,7 +4954,7 @@ if (command === "--version" || command === "-v") {
   process.exit(0);
 }
 const COMMANDS = [
-  "lead", "queen", "queen-audit", "init", "attach", "start", "stop", "show", "hide", "layout", "status", "portfolio", "crew", "crew-restore", "next", "setup", "upgrade", "doctor",
+  "lead", "queen", "queen-audit", "init", "attach", "start", "stop", "show", "hide", "peek", "layout", "status", "portfolio", "crew", "crew-restore", "next", "setup", "upgrade", "doctor",
   LEAD_PANE_EXITED_VERB,
   LEAD_HANDOFF_GRACE_VERB,
   LEAD_HANDOFF_START_VERB,
@@ -4927,6 +5012,9 @@ try {
       break;
     case "hide":
       cmdHide(rest);
+      break;
+    case "peek":
+      cmdPeek(rest);
       break;
     case "layout":
       cmdLayout(rest);

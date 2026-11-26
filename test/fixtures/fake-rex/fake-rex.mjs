@@ -738,6 +738,7 @@ function apiCall(state, method, params) {
       if (params.focus) {
         window.focused_block_id = layer.blocks[0];
         sessionById(state, params.session_id).active_window_id = window.window_id;
+        if (layer.kind !== "tiled") window.layers.push(...window.layers.splice(window.layers.indexOf(layer), 1));
       }
       return { revision: nextRevision(state) };
     }
