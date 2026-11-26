@@ -22,20 +22,6 @@ import {
   type WindowLayout,
 } from "../tmux.js";
 
-export const rexRefusal = (operation: string): string =>
-  `${operation} is not available under the Rex terminal in this build; restart the lead with HIVE_TERMINAL=tmux to use it`;
-
-export class RexNotImplemented extends Error {
-  constructor(readonly operation: string) {
-    super(rexRefusal(operation));
-    this.name = "RexNotImplemented";
-  }
-}
-
-const refuse = (operation: string): never => {
-  throw new RexNotImplemented(operation);
-};
-
 
 export interface RexStore {
   inTransaction?: boolean;
@@ -608,7 +594,6 @@ export function rexStopProcess(target: string, timeoutMs: number, server?: strin
   return { exited, gone: rexProbe(target, resolved).live === false };
 }
 
-export const rexStop = (target: string, timeoutMs: number, server?: string): void => void rexStopProcess(target, timeoutMs, server);
 
 export function rexFinalScreen(target: string, lines: number, server?: string): string {
   return rexCapture(target, Math.max(lines * 10, 200), false, server).split("\n").filter((row) => row.trim() !== "").slice(-lines).join("\n");
@@ -672,6 +657,20 @@ export function rexReapPending(snap: RexSnapshot | null | undefined, lines = 30)
 
 export const REX_SHELL_FLAVOR = "com.superlogical.terminal.shell";
 export const REX_IN_USE_KEY = "terminal:rex:in-use";
+
+export function rexReleaseInUse(): void {
+  if (store === null) return;
+  bestEffort(() =>
+    sql()
+      .prepare(
+        `DELETE FROM kv WHERE key = ? AND updated_at < datetime('now', '-10 minutes')
+           AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.project_id = kv.project_id AND a.status = 'running'
+                             AND (a.tmux_target LIKE 'block:%' OR a.tmux_socket LIKE ?))
+           AND NOT EXISTS (SELECT 1 FROM kv r WHERE r.project_id = kv.project_id AND r.key LIKE ?)`,
+      )
+      .run(REX_IN_USE_KEY, `${REX_SOCKET_PREFIX}%`, `${REAP_PENDING_PREFIX}%`),
+  );
+}
 export const REX_QUICK_EXIT_MS = 1000;
 export const rexWindowKey = (projectId: number): string => `terminal:rex:window:${projectId}`;
 export const rexSocketOf = (server: string): string => `${REX_SOCKET_PREFIX}${server}`;

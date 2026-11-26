@@ -103,7 +103,7 @@ describe("every tmux pane fixture reads the same through the FromRaw variants as
       assert.deepEqual(T.inputBoxSnapshotFromRaw(styled), T.inputBoxSnapshot(pane), `${file} inputBoxSnapshot`);
       assert.deepEqual(T.claudeTrailerViewFromRaw(styled), T.claudeTrailerView(pane), `${file} claudeTrailerView`);
       assert.deepEqual(T.paneChoiceCheckFromRaw(plain), T.paneChoiceCheck(pane), `${file} paneChoiceCheck`);
-      assert.deepEqual(T.codexInputBoxStateFromRaw(styled, title), T.codexInputBoxState(pane), `${file} codexInputBoxState`);
+      assert.deepEqual(T.codexInputBoxStateFromRaw(styled), T.codexInputBoxState(pane), `${file} codexInputBoxState`);
       assert.deepEqual(T.codexTrailerViewFromRaw(styled), T.codexTrailerView(pane), `${file} codexTrailerView`);
       assert.deepEqual(T.codexPaneChoiceCheckFromRaw(plain, title), T.codexPaneChoiceCheck(pane), `${file} codexPaneChoiceCheck`);
       tmux("kill-session", "-t", `=${session}`);
@@ -118,7 +118,7 @@ describe("every tmux pane fixture reads the same through the FromRaw variants as
     for (const file of fixtures) {
       const raw = readFileSync(join(PANE_FIXTURES, file), "utf8");
       states.add(T.inputBoxSnapshotFromRaw(raw).box?.state ?? "none");
-      states.add(`codex:${T.codexInputBoxStateFromRaw(raw, null)?.state ?? "none"}`);
+      states.add(`codex:${T.codexInputBoxStateFromRaw(raw)?.state ?? "none"}`);
       choices.add(T.paneChoiceCheckFromRaw(raw).awaitingChoice);
       choices.add(`codex:${T.codexPaneChoiceCheckFromRaw(raw, null).awaitingChoice}`);
     }

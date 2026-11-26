@@ -13,7 +13,7 @@ import {
 } from "../context.js";
 import { confirmQueenWrite } from "../queenAudit.js";
 import { errorMessage, run } from "../result.js";
-import { HELP_TOPICS, helpOverview } from "../help.js";
+import { HELP_TOPICS, helpOverview, REX_LAYOUT_HELP } from "../help.js"; import { rexActive } from "../terminal.js";
 import { idParam } from "./params.js";
 import { formatRowCounts, PROJECT_OWNER_TABLES, projectRowCounts, removeProject } from "../projectRemove.js";
 
@@ -134,7 +134,8 @@ export function registerMeta(server: McpServer): void {
     ({ topic }) =>
       run(() => {
         if (!topic) return helpOverview();
-        const text = HELP_TOPICS[topic.toLowerCase()];
+        const upstream = HELP_TOPICS[topic.toLowerCase()];
+        const text = upstream && topic.toLowerCase() === "layout" && rexActive() ? `${upstream.slice(0, upstream.lastIndexOf("\n\n"))}\n\n${REX_LAYOUT_HELP}` : upstream;
         if (!text) {
           throw new Error(`Unknown topic "${topic}". Topics: ${Object.keys(HELP_TOPICS).join(", ")}`);
         }

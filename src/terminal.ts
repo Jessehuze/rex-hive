@@ -12,7 +12,7 @@ import {
   rexRespawn,
   rexProbe,
   rexReapExited,
-  rexReapPending,
+  rexReapPending, rexReleaseInUse,
   rexRowProbe,
   rexSendKey,
   rexSendKeys,
@@ -328,7 +328,9 @@ export function reapExitedBlock(row: { id: number; project_id: number; tmux_targ
 }
 
 export function reapPendingBlocks(snapshot: AliveSnapshot | null): void {
-  if (rexActive()) rexReapPending(rexOf(snapshot));
+  if (!rexActive()) return;
+  rexReapPending(rexOf(snapshot));
+  rexReleaseInUse();
 }
 
 export function targetLiveProbe(target: string): PaneProbe {
@@ -439,7 +441,7 @@ export function paneAwaitingChoice(target: string): boolean | null {
 
 export function codexInputBoxState(target: string): InputBoxState | null {
   if (!isRexTarget(target)) return tmuxCodexInputBoxState(target);
-  return rexScreen(() => codexInputBoxStateFromRaw(styledTail(target), null), null);
+  return rexScreen(() => codexInputBoxStateFromRaw(styledTail(target)), null);
 }
 
 export function codexTrailerView(target: string): TrailerView | null {

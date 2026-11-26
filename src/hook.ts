@@ -253,7 +253,7 @@ async function registerLeadMessagingSocket(actorId: string): Promise<void> {
   let socket = isAbsolute(raw) && !raw.includes("\0") ? raw : "";
   let pid = "";
   if (socket !== "") {
-    const { callerPane, panePidForRecord } = await import("./terminal.js");
+    const { callerPane, panePidForRecord } = await import("./rexInUse.js").then(() => import("./terminal.js")); // rexInUse registers the Rex probe; without it callerPane() is tmux-only here
     const pane = callerPane();
     if (pane !== "") pid = panePidForRecord(pane);
   }
