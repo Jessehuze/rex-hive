@@ -71,7 +71,18 @@ Run \`hive layout\` in a project to gather its live worker panes into the lead
 window and re-apply the merged hive.yml layout. The command takes no flags. It
 does nothing when the resolved placement is "window".
 
-This is a CLI command for the local tmux environment, not an MCP tool.`,
+Hiding, showing and peeking at workers (Rex only):
+\`hive hide <name>\` and \`hive show <name>\` take a hive.yml process name or a
+running worker's name; a name that is both is refused. \`--all\` covers every
+running worker and no process. On Rex a hidden worker is a minimized float in
+the lead's tab, so it still runs, receives wakes and reports state. \`hive show\`
+moves it back into the lead's split, or into a new tab for placement "window".
+\`hive peek <worker>\` restores the float over the lead and focuses it without
+moving it; \`hive hide\` minimizes it again. hive.yml \`workers: hidden\` makes
+agent_spawn start new workers hidden. tmux refuses hiding a worker and ignores
+\`workers: hidden\` with a one-time note.
+
+These are CLI commands for the local terminal, not MCP tools.`,
 
   workflow: `WORKFLOW — lead/worker orchestration
 

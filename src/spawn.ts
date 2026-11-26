@@ -42,7 +42,7 @@ import {
   waitForPaneEstablished,
   rowOwnership,
 } from "./terminal.js";
-import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexRefuseQuickExit } from "./terminal/rex.js";
+import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexRefuseQuickExit, rexRememberShownAs } from "./terminal/rex.js";
 
 export function withWindowClaim<T>(claim: () => T): T {
   if (db.inTransaction) {
@@ -82,6 +82,8 @@ export interface LaunchSpec {
   // "processes" is reachable only from a hive.yml `visible: false` command (startYmlCommand);
   // agent_spawn's own enum stays "split" | "window", so no worker or lead can be placed this way.
   placement: "split" | "window" | "processes";
+
+  hidden?: boolean;
 
   layout?: WindowLayout;
   parentActor: string;
@@ -271,11 +273,12 @@ type PlacedPane = {
 };
 
 function placeRexPane(
-  spec: Pick<LaunchSpec, "projectId" | "projectName" | "name" | "cwd" | "placement" | "retainOnExit">,
+  spec: Pick<LaunchSpec, "projectId" | "projectName" | "name" | "cwd" | "placement" | "hidden" | "retainOnExit">,
   lead: { tmux_target: string },
   envFlags: string[],
   commandString: string,
 ): PlacedPane {
+  const hidden = spec.placement === "processes" || spec.hidden === true;
   const placed = withWindowClaim(() => rexCreatePane({
     projectId: spec.projectId,
     projectName: spec.projectName,
@@ -283,10 +286,11 @@ function placeRexPane(
     cwd: spec.cwd,
     env: envFromFlags(envFlags),
     argv: commandArgv(commandString),
-    placement: spec.placement === "processes" ? "hidden" : spec.placement,
+    placement: hidden ? "hidden" : spec.placement as "split" | "window",
     beside: lead.tmux_target,
     retainOnExit: spec.retainOnExit ?? false,
   }));
+  if (hidden && spec.placement !== "processes") rexRememberShownAs(spec.projectId, placed.target, spec.placement as "split" | "window");
   return { target: placed.target, pid: placed.pid, socket: placed.socket, landedInProjectId: null, layoutApplied: false, inProcessesWindow: spec.placement === "processes" };
 }
 
@@ -300,6 +304,7 @@ function placeAgentPane(
     | "name"
     | "cwd"
     | "placement"
+    | "hidden"
     | "layout"
     | "parentActor"
     | "retainOnExit"

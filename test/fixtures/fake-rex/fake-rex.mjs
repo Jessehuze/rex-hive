@@ -608,6 +608,7 @@ const SCHEMAS = {
   "session.detach_block": { keys: ["block_id", "session_id"], required: ["session_id", "block_id"] },
   "session.resize_pane": { keys: ["after_block_id", "before_block_id", "direction", "ratio", "session_id"], required: ["session_id", "direction", "before_block_id", "after_block_id", "ratio"] },
   "session.view": { keys: ["session_id"], required: ["session_id"] },
+  "session.focus_block": { keys: ["block_id", "session_id"], required: ["session_id", "block_id"] },
 };
 
 const checkRatio = (ratio) => {
