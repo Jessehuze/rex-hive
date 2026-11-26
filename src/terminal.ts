@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { isTerminal, readGlobalConfig, type Terminal } from "./globalConfig.js";
-import { defaultRexServer } from "./rexCli.js";
+import { defaultRexServer, rexCallerBlock } from "./rexCli.js";
 import {
   rexBlockAlive,
   rexCapture,
@@ -9,6 +9,7 @@ import {
   envFromFlags,
   rexOwnership,
   rexRespawn,
+  rowServer,
   rexProbe,
   rexRowProbe,
   rexSendKey,
@@ -122,7 +123,12 @@ export interface RespawnArgs {
   cwd: string;
   env: string[];
   command: string;
-  rex?: { projectId: number; projectName: string; record: (placed: { target: string; pid: string }) => void };
+  rex?: {
+    projectId: number;
+    projectName: string;
+    record: (placed: { target: string; pid: string }) => void;
+    orphaned?: (detail: string) => void;
+  };
 }
 
 let rexInUseProbe: () => boolean = () => false;
@@ -171,9 +177,16 @@ export function splitPane({ argv, clientPath }: SplitArgs): { target: string; pi
 }
 
 export function respawnPane({ target, cwd, env, command, rex }: RespawnArgs): { target: string } {
-  if (isRexTarget(target)) return rexRespawn(target, rexLeadSpec(rex, cwd, env, command), rex?.record);
+  if (isRexTarget(target)) return rexRespawn(target, rexLeadSpec(rex, cwd, env, command), rex?.record, rex?.orphaned);
   tmux("respawn-pane", "-k", "-t", target, "-c", cwd, ...env, command);
   return { target };
+}
+
+export function callerIsOtherLiveBlock(target: string, socket: string): boolean {
+  const caller = rexCallerBlock();
+  if (!caller || !isRexTarget(target) || caller === target) return false;
+  const probe = rexProbe(target, rowServer(socket, target) ?? undefined);
+  return probe.live === true && !probe.exited;
 }
 
 function rexLeadSpec(rex: RespawnArgs["rex"], cwd: string, env: string[], command: string) {

@@ -881,6 +881,8 @@ function main(argv) {
       const f = flags(tail.slice(1), { "-s": "session", "--session": "session" });
       const [method, raw] = f._;
       const params = parseParams(raw);
+      const [sleepOn, sleepFor] = (process.env.FAKE_REX_SLEEP_ON ?? "").split(":");
+      if (sleepOn === method) sleepMs(Number(sleepFor) || 0);
       emit(withLock((s) => {
         if (f.session && !params.session_id) {
           const found = s.sessions.find((x) => x.session_id === f.session || x.label === f.session);

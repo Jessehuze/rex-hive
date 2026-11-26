@@ -818,7 +818,28 @@ function blockOptions(spec: RexPaneSpec, size: { columns: number; rows: number }
   };
 }
 
-export function rexRespawn(old: string, spec: RexPaneSpec, record: (placed: RexPlaced) => void = () => {}): { target: string; pid: string } {
+export const REX_CLOSE_ATTEMPTS = 3;
+
+function closeWithRetry(target: string, server: string): string | null {
+  let detail = "";
+  for (let attempt = 1; attempt <= REX_CLOSE_ATTEMPTS; attempt++) {
+    try {
+      rexClose(target, server);
+      return null;
+    } catch (err) {
+      detail = err instanceof Error ? err.message : String(err);
+    }
+    if (attempt < REX_CLOSE_ATTEMPTS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150 * attempt);
+  }
+  return detail;
+}
+
+export function rexRespawn(
+  old: string,
+  spec: RexPaneSpec,
+  record: (placed: RexPlaced) => void = () => {},
+  orphaned: (detail: string) => void = () => {},
+): { target: string; pid: string } {
   const server = requireServer(old, null);
   const session = rexSessionOf(server, old);
   const size = spec.size ?? blockSize(server, session, old);
@@ -838,7 +859,8 @@ export function rexRespawn(old: string, spec: RexPaneSpec, record: (placed: RexP
     bestEffort(() => rexClose(target, server));
     throw err;
   }
-  bestEffort(() => rexClose(old, server));
+  const closeFailure = closeWithRetry(old, server);
+  if (closeFailure !== null) bestEffort(() => orphaned(closeFailure));
   return { target, pid: placed.pid };
 }
 

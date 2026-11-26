@@ -297,6 +297,7 @@ async function graceLoop(argv: string[]): Promise<number> {
       return 0;
     }
     if (!casHandoff(row.id, ["grace"], { state: "respawning", owner_pid: process.pid, respawn_claimed_at: nowSql() }, { attempt, owner_token: token })) return 0;
+    let recorded = false;
     for (let respawnAttempt = 1; respawnAttempt <= 3; respawnAttempt++) {
       if (respawnAttempt > 1) {
         await sleepMs(200);
@@ -304,14 +305,24 @@ async function graceLoop(argv: string[]): Promise<number> {
         if (current?.state !== "respawning" || current.attempt !== attempt || current.owner_token !== token) return 0;
       }
       try {
+        const predecessor = row.pane_target;
         const rex = terminalOfRow(lead!) === "rex"
-          ? { projectId: lead!.project_id, projectName: lead!.name, record: (placed: { target: string; pid: string }) => recordRexSuccessor.immediate(row, lead!, attempt, token, placed) }
+          ? {
+              projectId: lead!.project_id,
+              projectName: lead!.name,
+              record: (placed: { target: string; pid: string }) => {
+                recordRexSuccessor.immediate(row, lead!, attempt, token, placed);
+                recorded = true;
+              },
+              orphaned: (detail: string) =>
+                console.error(`hive lead-handoff-grace: handoff #${row.id}: the predecessor block ${predecessor} could not be closed and is left running with no row: ${detail}`),
+            }
           : undefined;
         row.pane_target = respawnPane({ target: row.pane_target, cwd: lead!.path, env: launch.env, command: launch.launch, rex }).target;
         return 0;
       } catch (e) {
         const detail = e instanceof Error ? e.message : String(e);
-        if (e instanceof TmuxTimeoutError || e instanceof RexTimeoutError) {
+        if (e instanceof TmuxTimeoutError || (e instanceof RexTimeoutError && recorded)) {
           casHandoff(row.id, ["respawning"], { state: "ambiguous", failure: `respawn-pane timed out; the pane's owner is unknown: ${detail}` }, { attempt, owner_token: token });
         } else {
           const enxio = e instanceof TmuxError && e.stderr === "respawn pane failed: fork failed: Device not configured";
@@ -352,10 +363,10 @@ async function recordedSuccessor(id: number, attempt: number, token: string, pan
 export async function runHandoffStart(argv: string[]): Promise<number> {
   if (rejectUnknownFlag(argv, "lead-handoff-start", ["request", "attempt", "token"], "--request <id>, --attempt <n>, --token <token>")) return 1;
   const parsed = flags(argv, ["request", "attempt", "token"]);
+  const failBootstrap = (id: number, why: string, where: Partial<Record<keyof HandoffRow, string | number | null>> = {}): boolean =>
+    casHandoff(id, ["respawning", "ambiguous"], { state: "failed", failure: `the successor bootstrap refused: ${why}`, owner_token: null, owner_pid: null }, where);
   const refuse = (why: string, id?: number): number => {
-    if (id !== undefined) {
-      casHandoff(id, ["respawning", "ambiguous"], { state: "failed", failure: `the successor bootstrap refused: ${why}`, owner_token: null, owner_pid: null });
-    }
+    if (id !== undefined) failBootstrap(id, why);
     console.error(`hive lead-handoff-start: ${why}. The handoff pad stays active; run hive lead to start a lead.`);
     return 1;
   };
@@ -364,11 +375,19 @@ export async function runHandoffStart(argv: string[]): Promise<number> {
   const attempt = intFlag(parsed.attempt);
   if (id === null || attempt === null) return refuse("bad arguments");
   const pane = callerPane();
-  const row = isRexTarget(pane) ? await recordedSuccessor(id, attempt, parsed.token, pane) : readHandoff(id);
+  let row = isRexTarget(pane) ? await recordedSuccessor(id, attempt, parsed.token, pane) : readHandoff(id);
   if (row === null || (row.state !== "respawning" && row.state !== "ambiguous") || row.attempt !== attempt || row.owner_token !== parsed.token) {
     return refuse("this bootstrap does not own a respawning handoff");
   }
-  if (pane !== row.pane_target) return refuse("this is not the pane the handoff respawned", id);
+  if (pane !== row.pane_target && !isRexTarget(pane)) return refuse("this is not the pane the handoff respawned", id);
+  if (pane !== row.pane_target) {
+    const why = "this is not the pane the handoff respawned";
+    if (failBootstrap(id, why, { pane_target: row.pane_target })) return refuse(why);
+    row = readHandoff(id);
+    if (row === null || (row.state !== "respawning" && row.state !== "ambiguous") || row.attempt !== attempt || row.owner_token !== parsed.token || row.pane_target !== pane) {
+      return refuse(why);
+    }
+  }
   const pid = panePidForRecord(pane);
   if (pid === "" || pid !== String(process.ppid)) return refuse("the pane's process id does not match this bootstrap's shell", id);
   const publish = db.transaction((): boolean => {
