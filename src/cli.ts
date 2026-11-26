@@ -1874,6 +1874,16 @@ function focusRexLead(target: string, socket: string): void {
   }
 }
 
+function liveTmuxLead(projectId: number): boolean {
+  const row = db
+    .prepare(
+      `SELECT tmux_target, tmux_socket, pane_pid FROM agents
+        WHERE project_id = ? AND kind = 'lead' AND status = 'running' AND tmux_target NOT LIKE 'block:%' ORDER BY id DESC LIMIT 1`,
+    )
+    .get(projectId) as RowPaneIdentity | undefined;
+  return !!row && rowOwnership(row) === "live";
+}
+
 function cmdAttach(argv: string[]): void {
   const parsed = parseArgs(argv, {});
   rejectUnknownFlags("attach", parsed, "none");
@@ -1882,9 +1892,14 @@ function cmdAttach(argv: string[]): void {
   const { config } = loadProjectYml(project.path);
   maybeOpenDashboard(project, !!config?.dashboard);
   const rexLead = rexProjectLead(project.id);
-  if (rexLead || resolveTerminal(config).terminal === "rex") {
-    if (rexLead && rowOwnership(rexLead) === "live") return focusRexLead(rexLead.tmux_target, rexLead.tmux_socket);
-    console.error(`hive attach: project "${project.name}" has no running Rex lead to focus. Start one with: hive lead ${shellQuote(project.path)}`);
+  const rexOwnership = rexLead ? observeRowOwnership(rexLead) : null;
+  if (rexLead && rexOwnership === "live") return focusRexLead(rexLead.tmux_target, rexLead.tmux_socket);
+  if (resolveTerminal(config).terminal === "rex" && !liveTmuxLead(project.id)) {
+    console.error(
+      rexOwnership === "probe-failed"
+        ? `hive attach: Rex could not be probed, so hive cannot tell whether project "${project.name}"'s Rex lead is running. Nothing was focused.`
+        : `hive attach: project "${project.name}" has no running Rex lead to focus. Start one with: hive lead ${shellQuote(project.path)}`,
+    );
     process.exit(1);
   }
   const session = sessionName();

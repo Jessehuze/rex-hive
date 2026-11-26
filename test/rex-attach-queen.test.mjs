@@ -18,6 +18,7 @@ const { db, migrate } = await import("../dist/db.js");
 if (!db.name.startsWith(dirs.dataDir)) throw new Error(`refusing: opened ${db.name}`);
 migrate();
 const { rexApi } = await import("../dist/rexCli.js");
+const { sessionName } = await import("../dist/tmux.js");
 
 const QUEEN_SESSIONS = ["rexq-alpha", "rexq-queen"];
 after(() => {
@@ -27,7 +28,7 @@ after(() => {
       tmux("kill-session", "-t", `=${name}`);
     } catch {}
   }
-  cleanupTmux();
+  cleanupTmux(sessionName());
 });
 
 const READY = join(REPO, "test", "fixtures", "panes", "ready-idle.txt");
@@ -63,6 +64,21 @@ const apiCallsSince = (mark) =>
   });
 const FOCUS_METHODS = new Set(["session.focus_block", "client.list", "client.perform"]);
 const APP = { client_id: "client:fake-app", principal: { kind: "peer", transport: "unix", display: "fake-user" }, connected_at: "2026-01-01T00:00:00Z", info: { kind: "app", name: "Rex.app" } };
+const CLI_CLIENT = { ...APP, client_id: "client:fake-cli", info: { kind: "cli", name: "rex" } };
+const LOST_APP = { ...APP, client_id: "client:fake-lost-app", connection_state: "lost", connection_lost_at: "2026-01-01T00:00:01Z" };
+const SWITCHED = "- focused the lead: ";
+const NOT_SWITCHED = "no Rex app switched to it";
+const TMUX_ATTACH = "Attach from a terminal with: tmux";
+
+async function tmuxLeadUnderRex(name) {
+  const dir = freshProject(name, "dashboard: false\nterminal: rex\n");
+  const started = await cli(["lead", dir, "--detach"], dir, { HIVE_TERMINAL: "tmux" });
+  assert.equal(started.code, 0, started.stdout + started.stderr);
+  const project = projectOf(dir);
+  const lead = leadRow(db, project.id);
+  assert.match(lead.tmux_target, /^%/);
+  return { dir, project, lead };
+}
 
 function labelsOf(block) {
   const state = fake.state();
@@ -74,7 +90,7 @@ function labelsOf(block) {
 describe("Rex attach and focus", () => {
   it("hive attach on Rex focuses the lead and selects its session", async () => {
     const { dir, lead, block } = await rexLead("attach-select");
-    fakeRexDo(dirs.tmp, "setClients", { clients: [APP] });
+    fakeRexDo(dirs.tmp, "setClients", { clients: [CLI_CLIENT, LOST_APP, APP] });
     const performedBefore = fake.state().performed.length;
     const mark = fake.calls().length;
     const attached = await cli(["attach", dir], dir);
@@ -89,6 +105,9 @@ describe("Rex attach and focus", () => {
     assert.equal(state.windows.find((w) => w.window_id === state.blocks[lead.tmux_target].window_id).focused_block_id, lead.tmux_target);
     assert.deepEqual(state.performed.slice(performedBefore).map((p) => [p.client_id, p.action, p.args.session_id]), [[APP.client_id, "session.select", block.session_id]]);
     assert.doesNotMatch(attached.stdout, /tmux/);
+    assert.ok(attached.stdout.includes(SWITCHED), attached.stdout);
+    assert.equal(attached.stdout.includes(NOT_SWITCHED), false, attached.stdout);
+    fakeRexDo(dirs.tmp, "setClients", { clients: [] });
   });
 
   it("hive attach with no Rex client prints the session and tab and exits 0", async () => {
@@ -104,6 +123,8 @@ describe("Rex attach and focus", () => {
       const methods = apiCallsSince(mark).map((c) => c.method);
       assert.ok(methods.includes("session.focus_block"), methods.join(","));
       assert.ok(methods.includes("client.perform"), methods.join(","));
+      assert.ok(attached.stdout.includes(NOT_SWITCHED), attached.stdout);
+      assert.equal(attached.stdout.includes(SWITCHED), false, attached.stdout);
       const state = fake.state();
       assert.equal(state.windows.find((w) => w.window_id === state.blocks[lead.tmux_target].window_id).focused_block_id, lead.tmux_target);
     } finally {
@@ -144,6 +165,57 @@ describe("Rex attach and focus", () => {
       assert.deepEqual(calls.map((c) => c.method), ["session.focus_block", "client.list", "client.perform"]);
       assert.deepEqual(calls[0].params, { session_id: session, block_id: lead.tmux_target });
       assert.equal(calls[2].params.args.session_id, session);
+    } finally {
+      fakeRexDo(dirs.tmp, "setClients", { clients: [] });
+    }
+  });
+});
+
+describe("attach follows the live lead's own terminal", () => {
+  const tmuxIt = (name, fn) => it(name, { skip: hasTmux ? false : "tmux is not installed" }, fn);
+
+  tmuxIt("hive attach on a live tmux lead under terminal: rex takes the tmux attach path", async () => {
+    const { dir } = await tmuxLeadUnderRex("attach-tmux-under-rex");
+    const mark = fake.calls().length;
+    const attached = await cli(["attach", dir], dir);
+    assert.equal(attached.code, 0, attached.stdout + attached.stderr);
+    assert.ok(attached.stdout.includes(TMUX_ATTACH), attached.stdout + attached.stderr);
+    assert.deepEqual(apiCallsSince(mark).filter((c) => FOCUS_METHODS.has(c.method)), []);
+  });
+
+  tmuxIt("hive next under terminal: rex adopts and attaches a live tmux lead", async () => {
+    const { dir, project, lead } = await tmuxLeadUnderRex("next-tmux-under-rex");
+    for (let i = 0; i < 3; i++) db.prepare("INSERT INTO todos (project_id, title, tags) VALUES (?, 'call me', ?)").run(project.id, JSON.stringify(["needs-human"]));
+    const mark = fake.calls().length;
+    const next = await cli(["next"], dir);
+    assert.equal(next.code, 0, next.stdout + next.stderr);
+    assert.equal(JSON.parse(next.stdout.trim().split("\n")[0]).project_id, project.id);
+    assert.equal(leadRow(db, project.id).tmux_target, lead.tmux_target);
+    assert.ok(next.stdout.includes(TMUX_ATTACH), next.stdout + next.stderr);
+    assert.deepEqual(apiCallsSince(mark).filter((c) => FOCUS_METHODS.has(c.method)), []);
+  });
+
+  tmuxIt("hive attach on a project set to tmux with a closed Rex lead block falls through to the tmux path", async () => {
+    const { dir, lead } = await rexLead("attach-stale-rex");
+    fakeRexDo(dirs.tmp, "closeBlock", { block_id: lead.tmux_target });
+    const mark = fake.calls().length;
+    const attached = await cli(["attach", dir], dir);
+    assert.equal(attached.code, 0, attached.stdout + attached.stderr);
+    assert.ok(attached.stdout.includes(TMUX_ATTACH), attached.stdout + attached.stderr);
+    assert.deepEqual(apiCallsSince(mark).filter((c) => FOCUS_METHODS.has(c.method)), []);
+  });
+
+  it("hive attach still selects and names the session id when session.view fails after focusing", async () => {
+    const { dir, lead, block } = await rexLead("attach-view-fails");
+    fakeRexDo(dirs.tmp, "setClients", { clients: [APP] });
+    try {
+      const performedBefore = fake.state().performed.length;
+      const attached = await cli(["attach", dir], dir, { FAKE_REX_FAIL_ON: "session.view" });
+      assert.equal(attached.code, 0, attached.stdout + attached.stderr);
+      assert.ok(attached.stdout.includes(`${SWITCHED}Rex session ${block.session_id}, tab (unknown)`), attached.stdout + attached.stderr);
+      const state = fake.state();
+      assert.equal(state.windows.find((w) => w.window_id === state.blocks[lead.tmux_target].window_id).focused_block_id, lead.tmux_target);
+      assert.deepEqual(state.performed.slice(performedBefore).map((p) => [p.client_id, p.args]), [[APP.client_id, { session_id: block.session_id }]]);
     } finally {
       fakeRexDo(dirs.tmp, "setClients", { clients: [] });
     }

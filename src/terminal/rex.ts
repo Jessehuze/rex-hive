@@ -1345,9 +1345,13 @@ export function rexFocus(target: string, server?: string): RexFocus {
     if (!blockGone(err)) throw err;
     focused = false;
   }
-  const view = rexApi<LabelledView>(resolved, "session.view", { session_id: session });
-  const window = placeOf(view as SessionView, target)?.window ?? "";
-  const tab = (view.windows ?? []).find((w) => w.window_id === window)?.label ?? "";
-  const hint = `Rex session ${view.label ?? session}, tab ${tab || window || "(none)"}`;
+  let window = "";
+  let hint = `Rex session ${session}, tab (unknown)`;
+  try {
+    const view = rexApi<LabelledView>(resolved, "session.view", { session_id: session });
+    window = placeOf(view as SessionView, target)?.window ?? "";
+    const tab = (view.windows ?? []).find((w) => w.window_id === window)?.label ?? "";
+    hint = `Rex session ${view.label || session}, tab ${tab || window || "(unknown)"}`;
+  } catch {}
   return { focused, selected: focused && selectSession(resolved, session, window), hint };
 }
