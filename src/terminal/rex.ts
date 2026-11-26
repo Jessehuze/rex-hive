@@ -52,6 +52,8 @@ const sql = (): RexStore => {
 };
 
 export const REX_UNREACHABLE_GRACE_MS = 600_000;
+export const REX_UNREACHABLE_STALE_MS = 120_000;
+export const REX_BLOB_MAX_BYTES = 983_040;
 export const unreachableSinceKey = (server: string): string => `terminal:rex:unreachable-since:${server}`;
 export const REX_SOCKET_PREFIX = "rex:";
 export const REX_CAPTURE_BYTES_PER_LINE = 512;
@@ -67,7 +69,6 @@ export interface ProgramStatus {
 
 export interface RexBlock {
   pid: string;
-  pids: string[];
   argv: string;
   programs: string[];
   exited: boolean;
@@ -101,14 +102,39 @@ export interface RexSendOptions {
   server?: string;
 }
 
-function requireServer(server?: string | null): string {
-  const resolved = server ?? defaultRexServer();
+function guarded<T>(read: () => T, failed: T): T {
+  try {
+    return read();
+  } catch {
+    return failed;
+  }
+}
+
+function runningRowServer(target: string): string | null {
+  if (store === null || !target) return null;
+  const row = guarded(
+    () =>
+      sql()
+        .prepare(
+          `SELECT tmux_socket FROM agents WHERE status = 'running' AND tmux_target = ? AND tmux_socket LIKE 'rex:%'
+           ORDER BY id DESC LIMIT 1`,
+        )
+        .get(target) as { tmux_socket: string } | undefined,
+    undefined,
+  );
+  return row ? row.tmux_socket.slice(REX_SOCKET_PREFIX.length) : null;
+}
+
+export const serverForTarget = (target: string): string | null => runningRowServer(target) ?? defaultRexServer();
+
+function requireServer(target: string, server?: string | null): string {
+  const resolved = server ?? serverForTarget(target);
   if (!resolved) throw new RexUnavailableError("no Rex server is known to this process", "unreachable", "");
   return resolved;
 }
 
-export const rowServer = (socket: string): string | null =>
-  socket.startsWith(REX_SOCKET_PREFIX) ? socket.slice(REX_SOCKET_PREFIX.length) : defaultRexServer();
+export const rowServer = (socket: string, target = ""): string | null =>
+  socket.startsWith(REX_SOCKET_PREFIX) ? socket.slice(REX_SOCKET_PREFIX.length) : serverForTarget(target);
 
 const blockGone = (err: unknown): boolean => err instanceof RexError && BLOCK_GONE_CODES.has(err.code);
 
@@ -118,7 +144,8 @@ interface ResolveReply {
 
 export function rexSessionOf(server: string, block: string): string {
   const reply = rexApi<ResolveReply>(server, "target.resolve", { kinds: ["session"], queries: [block] });
-  const hit = reply.results?.[0];
+  if (!Array.isArray(reply.results)) throw new RexError("rex target.resolve printed no results", "bad_output", "");
+  const hit = reply.results[0];
   if (hit?.status !== "resolved" || !hit.target?.session_id) {
     throw new RexError(`block ${block} is not open on ${server}`, "not_found", "");
   }
@@ -146,11 +173,14 @@ export function rexKeyName(key: string): string {
   return mapped;
 }
 
-export function rexSendKey(target: string, key: string, server?: string): void {
-  const resolved = requireServer(server);
-  const name = rexKeyName(key);
-  rexKey(resolved, target, name, rexSessionOf(resolved, target));
+export function rexSendKeys(target: string, keys: string[], server?: string): void {
+  const names = keys.map(rexKeyName);
+  const resolved = requireServer(target, server);
+  const session = rexSessionOf(resolved, target);
+  for (const name of names) rexKey(resolved, target, name, session);
 }
+
+export const rexSendKey = (target: string, key: string, server?: string): void => rexSendKeys(target, [key], server);
 
 interface ModesReply {
   modes?: { name?: string; number?: number; set?: boolean }[] | null;
@@ -164,7 +194,7 @@ export function rexBracketedPaste(server: string, session: string, block: string
 export async function rexSendText(target: string, text: string, opts: RexSendOptions = {}): Promise<void> {
   const unsafe = findUnsafeControlChar(text, TEXT_ALLOWED_CONTROL_CHARS);
   if (unsafe) throw new RexError(`refusing to paste a control character (${unsafe.label}) at index ${unsafe.index}`, "bad_request", "");
-  const server = requireServer(opts.server);
+  const server = requireServer(target, opts.server);
   const session = rexSessionOf(server, target);
   if (text !== "") {
     if (!rexBracketedPaste(server, session, target)) {
@@ -207,35 +237,48 @@ interface BlobReply {
   eof?: boolean;
 }
 
-function readTail(server: string, session: string, block: string, styled: boolean, budget: number): { text: string; cut: boolean } {
-  const head = blockMethod<FormatReply>(server, session, block, "format", { format: styled ? "vt" : "text", max_bytes: budget });
-  if (head.id === undefined || head.eof === true || head.total === undefined) return { text: head.content ?? "", cut: false };
-  let offset = Math.max(0, head.total - budget);
+function readForward(server: string, session: string, block: string, id: number, from: number, total?: number): string {
   let text = "";
-  for (let reads = 0; reads < 64 && offset < head.total; reads++) {
-    const part = blockMethod<BlobReply>(server, session, block, "blob_read", { id: head.id, offset, max_bytes: budget });
+  let offset = from;
+  for (let reads = 0; reads < 64; reads++) {
+    const part = blockMethod<BlobReply>(server, session, block, "blob_read", { id, offset, max_bytes: REX_BLOB_MAX_BYTES });
     const data = part.data ?? "";
     text += data;
     offset += Buffer.byteLength(data);
-    if (part.eof || data === "") break;
+    if (part.eof === true || data === "" || (total !== undefined && offset >= total)) break;
   }
-  return { text, cut: true };
+  return text;
+}
+
+function readTail(server: string, session: string, block: string, styled: boolean, budget: number): { text: string; cut: boolean } {
+  const head = blockMethod<FormatReply>(server, session, block, "format", { format: styled ? "vt" : "text", max_bytes: budget });
+  const content = head.content ?? "";
+  if (head.id === undefined || head.eof === true) return { text: content, cut: false };
+  if (head.total === undefined) return { text: content + readForward(server, session, block, head.id, Buffer.byteLength(content)), cut: false };
+  const start = Math.max(0, head.total - budget);
+  return { text: readForward(server, session, block, head.id, start, head.total), cut: start > 0 };
+}
+
+const blankRow = (row: string): boolean => row.replace(/\x1b\[[0-9;]*m/g, "").trim() === "";
+
+function screenRows(server: string, session: string, block: string): number {
+  return guarded(() => blockMethod<{ rows?: number }>(server, session, block, "size").rows ?? 0, 0);
 }
 
 export function rexCapture(target: string, lines: number, styled: boolean, server?: string): string {
-  const resolved = requireServer(server);
+  const resolved = requireServer(target, server);
   const session = rexSessionOf(resolved, target);
-  const { text, cut } = readTail(resolved, session, target, styled, Math.max(1, lines) * REX_CAPTURE_BYTES_PER_LINE);
-  const normal = styled ? normalizeRexVt(text) : text.replace(/\r\n/g, "\n");
-  const rows = normal.split("\n");
+  const want = Math.max(1, screenRows(resolved, session, target) + Math.max(0, lines));
+  const { text, cut } = readTail(resolved, session, target, styled, want * REX_CAPTURE_BYTES_PER_LINE);
+  const rows = (styled ? normalizeRexVt(text) : text.replace(/\r\n/g, "\n")).split("\n");
   if (cut) rows.shift();
-  if (rows.length > 1 && rows[rows.length - 1] === "") rows.pop();
-  return rows.slice(-Math.max(1, lines)).join("\n");
+  while (rows.length > 0 && blankRow(rows[rows.length - 1])) rows.pop();
+  return rows.slice(-want).join("\n");
 }
 
 export function rexTitle(target: string, server?: string): string | null {
   try {
-    const resolved = requireServer(server);
+    const resolved = requireServer(target, server);
     const reply = blockMethod<{ title?: string }>(resolved, rexSessionOf(resolved, target), target, "title");
     return reply.title ?? "";
   } catch {
@@ -277,10 +320,8 @@ function readProcess(reply: ProcessReply | null | undefined) {
   const foreground = reply?.foreground ?? null;
   const wrapped = child !== null && WRAPPER_PROGRAMS.has(programName(child.argv0 ?? child.name) ?? "");
   const main = wrapped ? (foreground ?? child) : child;
-  const pids = [child?.pid, foreground?.pid].filter((p): p is number => typeof p === "number").map(String);
   return {
     pid: main?.pid !== undefined ? String(main.pid) : "",
-    pids,
     argv: main?.argv0 ?? "",
     programs: [...programsOf(main), ...programsOf(foreground)],
     exited: reply?.last_exit !== undefined && reply?.last_exit !== null,
@@ -298,7 +339,7 @@ function readStatus(reply: { records?: StatusRecord[] | Record<string, never> } 
 
 export function rexProbe(target: string, server?: string): RexProbe {
   try {
-    const resolved = requireServer(server);
+    const resolved = requireServer(target, server);
     const reply = blockMethod<ProcessReply>(resolved, rexSessionOf(resolved, target), target, "process");
     const proc = readProcess(reply);
     return { live: true, pid: proc.pid || null, argv: proc.argv || null, exited: proc.exited };
@@ -345,17 +386,27 @@ function ownedBlocks(socket: string): string[] {
 
 export function unreachableSince(server: string): number | null {
   if (store === null) return null;
-  const row = sql().prepare("SELECT MIN(CAST(value AS INTEGER)) AS since FROM kv WHERE key = ?").get(unreachableSinceKey(server)) as
-    | { since: number | null }
-    | undefined;
-  return row?.since ?? null;
+  return guarded(() => {
+    const row = sql()
+      .prepare("SELECT MIN(CAST(json_extract(value, '$.since') AS INTEGER)) AS since FROM kv WHERE key = ?")
+      .get(unreachableSinceKey(server)) as { since: number | null } | undefined;
+    return row?.since ?? null;
+  }, null);
 }
 
 function markUnreachable(server: string): number | null {
-  const key = unreachableSinceKey(server);
-  const now = String(Date.now());
-  const insert = sql().prepare("INSERT OR IGNORE INTO kv (project_id, key, value, updated_by) VALUES (?, ?, ?, 'hive')");
-  for (const project of projectsOnServer(`${REX_SOCKET_PREFIX}${server}`)) insert.run(project, key, now);
+  const now = Date.now();
+  const upsert = sql().prepare(
+    `INSERT INTO kv (project_id, key, value, updated_by) VALUES (?, ?, json_object('since', ?, 'last', ?), 'hive')
+     ON CONFLICT (project_id, key) DO UPDATE SET
+       value = json_object(
+         'since', CASE WHEN ? - CAST(json_extract(kv.value, '$.last') AS INTEGER) > ? THEN ? ELSE CAST(json_extract(kv.value, '$.since') AS INTEGER) END,
+         'last', ?),
+       updated_at = datetime('now')`,
+  );
+  for (const project of projectsOnServer(`${REX_SOCKET_PREFIX}${server}`)) {
+    upsert.run(project, unreachableSinceKey(server), now, now, now, REX_UNREACHABLE_STALE_MS, now, now);
+  }
   return unreachableSince(server);
 }
 
@@ -372,7 +423,7 @@ function bestEffort(fn: () => void): void {
 export function rexSnapshot(server?: string | null, extraBlocks: string[] = []): RexSnapshot | null {
   let resolved: string;
   try {
-    resolved = requireServer(server);
+    resolved = requireServer("", server);
   } catch {
     return null;
   }
@@ -395,7 +446,7 @@ export function rexSnapshot(server?: string | null, extraBlocks: string[] = []):
     return null;
   }
   if (reply === null) return null;
-  bestEffort(() => clearUnreachable(resolved));
+  if (store !== null) bestEffort(() => clearUnreachable(resolved));
   const blocks = new Map<string, RexBlock>();
   const entries = reply.blocks && !Array.isArray(reply.blocks) ? Object.entries(reply.blocks) : [];
   for (const [id, entry] of entries) {
@@ -409,7 +460,17 @@ export function rexSnapshot(server?: string | null, extraBlocks: string[] = []):
       probed: entry.probed === true && entry.process !== undefined,
     });
   }
-  return { answered: true, server: resolved, incomplete: reply.incomplete === true, unreachableSince: null, blocks };
+  const incomplete = reply.incomplete === true || missingBlocksStillOpen(resolved, wanted.filter((id) => !blocks.has(id)));
+  return { answered: true, server: resolved, incomplete, unreachableSince: null, blocks };
+}
+
+function missingBlocksStillOpen(server: string, missing: string[]): boolean {
+  if (missing.length === 0) return false;
+  return guarded(() => {
+    const reply = rexApi<ResolveReply>(server, "target.resolve", { kinds: ["session"], queries: missing });
+    if (!Array.isArray(reply.results)) return true;
+    return reply.results.some((r) => r.status === "resolved");
+  }, true);
 }
 
 const commandHead = (command: string | null | undefined): string | null => programName(command?.trim().split(/\s+/)[0]);
@@ -419,9 +480,22 @@ function usableSnapshot(snap: RexSnapshot | null | undefined, server: string, ta
   return snap === null || !snap.answered || snap.blocks.get(target)?.probed !== false;
 }
 
+function rowCommand(row: RowPaneIdentity & { command?: string | null }): string | null {
+  if ("command" in row) return row.command ?? null;
+  if (store === null) return null;
+  const found = guarded(
+    () =>
+      sql()
+        .prepare("SELECT command FROM agents WHERE status = 'running' AND tmux_target = ? AND tmux_socket = ? ORDER BY id DESC LIMIT 1")
+        .get(row.tmux_target, row.tmux_socket) as { command: string } | undefined,
+    undefined,
+  );
+  return found?.command ?? null;
+}
+
 export function rexOwnership(row: RowPaneIdentity & { command?: string | null }, snap?: RexSnapshot | null): RowOwnership {
   if (row.tmux_target === "") return "gone";
-  const server = rowServer(row.tmux_socket);
+  const server = rowServer(row.tmux_socket, row.tmux_target);
   if (!server) return "unknown";
   const observed = usableSnapshot(snap, server, row.tmux_target) ? (snap ?? null) : rexSnapshot(server, [row.tmux_target]);
   if (observed === null) return "unknown";
@@ -430,21 +504,21 @@ export function rexOwnership(row: RowPaneIdentity & { command?: string | null },
   if (!block) return observed.incomplete ? "unknown" : "gone";
   if (!block.probed) return "unknown";
   if (block.exited) return "gone";
-  if (row.pane_pid === "" || block.pids.length === 0) return "unknown";
-  if (!block.pids.includes(row.pane_pid)) return "reissued";
-  const head = commandHead(row.command);
+  if (row.pane_pid === "" || block.pid === "") return "unknown";
+  if (block.pid !== row.pane_pid) return "reissued";
+  const head = commandHead(rowCommand(row));
   if (head !== null && block.programs.length > 0 && !block.programs.includes(head)) return "reissued";
   return "live";
 }
 
 function graceExpired(snap: RexSnapshot, server: string): boolean {
-  const since = snap.unreachableSince ?? unreachableSince(server);
+  const since = snap.unreachableSince ?? guarded(() => unreachableSince(server), null);
   return since !== null && Date.now() - since >= REX_UNREACHABLE_GRACE_MS;
 }
 
 export function rexRowProbe(socket: string, target: string, snap?: RexSnapshot | null): { live: Liveness; pid: string | null } {
   if (target === "") return { live: false, pid: null };
-  const server = rowServer(socket);
+  const server = rowServer(socket, target);
   if (!server) return { live: null, pid: null };
   const observed = usableSnapshot(snap, server, target) ? (snap ?? null) : rexSnapshot(server, [target]);
   if (observed === null) return { live: null, pid: null };
@@ -463,7 +537,7 @@ export function rexBlockAlive(target: string, snap: RexSnapshot | null | undefin
 }
 
 export function rexClose(target: string, server?: string): void {
-  const resolved = requireServer(server);
+  const resolved = requireServer(target, server);
   let session: string;
   try {
     session = rexSessionOf(resolved, target);
@@ -479,7 +553,7 @@ export function rexClose(target: string, server?: string): void {
 }
 
 export function rexStop(target: string, timeoutMs: number, server?: string): void {
-  const resolved = requireServer(server);
+  const resolved = requireServer(target, server);
   try {
     rexSendKey(target, "C-c", resolved);
   } catch (err) {

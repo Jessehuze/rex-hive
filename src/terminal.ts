@@ -1,6 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { isTerminal, readGlobalConfig, type Terminal } from "./globalConfig.js";
-import { defaultRexServer } from "./rexCli.js";
 import {
   rexBlockAlive,
   rexCapture,
@@ -9,6 +8,8 @@ import {
   rexProbe,
   rexRowProbe,
   rexSendKey,
+  rexSendKeys,
+  serverForTarget,
   rexSendText,
   rexSnapshot,
   rexTitle,
@@ -190,7 +191,7 @@ export function swapPane(source: string, target: string): void {
 
 export function sendKeys(target: string, keys: string[]): void {
   if (isRexTarget(target)) {
-    for (const key of keys) rexSendKey(target, key);
+    rexSendKeys(target, keys);
     return;
   }
   tmux("send-keys", "-t", target, "--", ...keys);
@@ -265,11 +266,12 @@ export function rowOwnership(row: RowPaneIdentity, snapshot?: AliveSnapshot | nu
 export function observeRowOwnership(row: RowPaneIdentity): RowOwnership | "probe-failed" {
   if (!rexRow(row.tmux_socket, row.tmux_target)) return tmuxObserveRowOwnership(row);
   if (row.tmux_target === "") return "gone";
-  const snap = rexSnapshot(rexServerFor(row.tmux_socket), [row.tmux_target]);
+  const snap = rexSnapshot(rexServerFor(row.tmux_socket, row.tmux_target), [row.tmux_target]);
   return snap === null ? "probe-failed" : rexOwnership(row, snap);
 }
 
-const rexServerFor = (socket: string): string | null => (isRexSocket(socket) ? rexServerOf(socket) : defaultRexServer());
+const rexServerFor = (socket: string, target: string): string | null =>
+  isRexSocket(socket) ? rexServerOf(socket) : serverForTarget(target);
 
 export function targetLiveProbe(target: string): PaneProbe {
   return isRexTarget(target) ? rexRowProbe("", target) : tmuxTargetLiveProbe(target);

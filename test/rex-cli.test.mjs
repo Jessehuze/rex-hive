@@ -43,7 +43,7 @@ async function newBlock(command, label = "b") {
 }
 
 const screenOf = async (b) =>
-  (await cli()).rexApi(REX_ADDR, "block.method", { session_id: b.session, block_id: b.block, method: "format", args: { format: "plain" } }).content;
+  (await cli()).rexApi(REX_ADDR, "block.method", { session_id: b.session, block_id: b.block, method: "format", args: { format: "text" } }).content;
 
 function verbOf(argv) {
   for (let i = 0; i < argv.length; i++) {

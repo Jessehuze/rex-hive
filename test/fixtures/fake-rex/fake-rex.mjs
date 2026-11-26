@@ -286,6 +286,30 @@ function screenOf(block) {
   return existsSync(file) ? readFileSync(file) : Buffer.alloc(0);
 }
 
+const ESCAPES = /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+
+function formatted(block, format) {
+  if (!["text", "html", "vt"].includes(format)) fail("bad_request", `format must be text, html or vt, not ${format}`);
+  const rows = screenOf(block).toString("utf8").split(/\r?\n/);
+  if (rows.at(-1) === "") rows.pop();
+  if (format === "vt") {
+    while (rows.length < block.size.rows) rows.push("");
+    return Buffer.from(rows.join("\r\n"));
+  }
+  const text = rows.map((r) => r.replace(ESCAPES, ""));
+  while (text.length > 0 && text.at(-1).trim() === "") text.pop();
+  return Buffer.from(text.join("\n"));
+}
+
+function jsonBoundedSlice(buf, start, maxBytes) {
+  let end = Math.min(buf.length, start + maxBytes);
+  for (;;) {
+    const data = buf.subarray(start, end).toString("utf8");
+    if (JSON.stringify(data).length - 2 <= maxBytes || end <= start) return data;
+    end = start + Math.floor((end - start) * 0.9);
+  }
+}
+
 function processInfo(block) {
   const exit = exitOf(block);
   const proc = block.child_pid && !exit
@@ -318,17 +342,22 @@ function blockMethod(state, params, method, args) {
     case "process":
       return processInfo(block);
     case "format": {
-      const all = screenOf(block);
+      const all = formatted(block, args?.format ?? "text");
       const max = args?.max_bytes;
-      if (!max) return { content: all.toString("utf8") };
-      if (all.length <= max) return { content: all.toString("utf8"), total: all.length, eof: true };
-      return { content: all.subarray(0, max).toString("utf8"), id: 7, total: all.length, eof: false };
+      if (!max || all.length <= max) return { content: all.toString("utf8") };
+      const id = (block.blob_seq = (block.blob_seq ?? 0) + 1);
+      writeFileSync(join(block.dir, `blob-${id}`), all);
+      const head = { id, total: all.length, content: jsonBoundedSlice(all, 0, max) };
+      if (process.env.FAKE_REX_FORMAT_NO_TOTAL === "1") delete head.total;
+      return head;
     }
     case "blob_read": {
-      const all = screenOf(block);
+      const file = join(block.dir, `blob-${args?.id}`);
+      if (!existsSync(file)) fail("not_found", `no blob ${args?.id}`);
+      const all = readFileSync(file);
       const start = args?.offset ?? 0;
-      const end = Math.min(all.length, start + (args?.max_bytes || 49152));
-      return { data: all.subarray(start, end).toString("utf8"), id: args?.id ?? 7, total: all.length, eof: end >= all.length };
+      const data = jsonBoundedSlice(all, start, Math.min(args?.max_bytes || 49152, 983040));
+      return { id: args.id, total: all.length, eof: start + Buffer.byteLength(data) >= all.length, data };
     }
     case "title":
       return { title: block.title ?? block.label, owner: null };
@@ -575,7 +604,7 @@ function snapshot(state, args, code, callerSession) {
       incomplete = true;
       continue;
     }
-    for (const b of Object.values(state.blocks).filter((x) => x.session_id === s.session_id)) {
+    for (const b of Object.values(state.blocks).filter((x) => x.session_id === s.session_id && !x.hidden)) {
       const entry = { session_id: s.session_id, session_label: s.label ?? "", window_id: b.window_id ?? "", label: b.label ?? "", placement: b.window_id ? "placed" : "detached", probed: false };
       if (wanted.has(b.block_id)) {
         const proc = processInfo(b);
@@ -647,6 +676,9 @@ function fakeOp(op, raw) {
       case "setScreenFile":
         writeFileSync(join(state.blocks[args.block_id].dir, "screen"), readFileSync(args.file));
         return {};
+      case "hideFromSnapshot":
+        state.blocks[args.block_id].hidden = true;
+        return {};
       case "setBracketedPaste":
         state.blocks[args.block_id].bracketed = args.on;
         return {};
@@ -694,8 +726,8 @@ function socketPathOf(url) {
   return decodeURIComponent(String(url).replace(/^unix:\/\//, ""));
 }
 
-function emit(value) {
-  process.stdout.write(`${JSON.stringify(value)}\n`);
+function emit(value, silent = false) {
+  if (!silent) process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
 function main(argv) {
@@ -770,7 +802,7 @@ function main(argv) {
           params.session_id = found.session_id;
         }
         return apiCall(s, method, params);
-      }));
+      }), process.env.FAKE_REX_EMPTY_ON === method);
       return 0;
     }
     case "send-key": {

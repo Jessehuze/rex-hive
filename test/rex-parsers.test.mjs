@@ -78,7 +78,6 @@ describe("Rex vt captures classify the same as their tmux counterparts", () => {
     assert.equal(T.claudeTrailerViewFromRaw(normalizeRexVt(rexFixture("claude-dialog.vt"))), null);
   });
 
-  it("codex Rex fixtures", { skip: "no Codex Rex fixture: Codex was not installed on the capture machine" }, () => {});
 });
 
 const capture = (pane, styled) =>

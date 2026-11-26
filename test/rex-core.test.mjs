@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 
-import { clearHiveEnv, isolateTmux, scratchDirs } from "./helpers.mjs";
+import { REPO, clearHiveEnv, isolateTmux, scratchDirs } from "./helpers.mjs";
 import { fakeRexDo, isolateRex } from "./rex-helpers.mjs";
 
 const { cleanup: cleanupTmux } = isolateTmux("rex core pane operation tests");
@@ -15,9 +15,11 @@ const REX_ADDR = process.env.REX_SERVER;
 
 const { db, migrate } = await import("../dist/db.js");
 migrate();
+await import("../dist/rexInUse.js");
 const terminal = await import("../dist/terminal.js");
+const { janitor } = await import("../dist/scheduler.js");
 const { rexApi } = await import("../dist/rexCli.js");
-const { REX_CAPTURE_BYTES_PER_LINE } = await import("../dist/terminal/rex.js");
+const { REX_CAPTURE_BYTES_PER_LINE, rexStop } = await import("../dist/terminal/rex.js");
 
 after(() => {
   fake.cleanup();
@@ -32,15 +34,26 @@ const paramsOf = (call) => {
   return i >= 0 ? { method: call.argv[i + 1], params: JSON.parse(call.argv[i + 2] ?? "{}") } : null;
 };
 
-function newBlock(label, command = ["sleep", "600"]) {
+function newBlock(label, command = ["sleep", "600"], size = undefined) {
   const made = rexApi(REX_ADDR, "session.create", {
     label: `s-${label}`,
-    initial_windows: [{ window_label: label, layout: { block: { flavor: "com.superlogical.terminal.shell", label, options: { shell: "none", command } } } }],
+    initial_windows: [{ window_label: label, layout: { block: { flavor: "com.superlogical.terminal.shell", label, options: { shell: "none", command, ...(size ? { size } : {}) } } } }],
   });
   return { session: made.session_id, window: made.initial_windows[0].window_id, block: made.initial_windows[0].block_ids[0] };
 }
 
 const eventsOf = (block) => fake.state().blocks[block].events;
+
+describe("with no Rex configured", () => {
+  it("liveTargets and the janitor make no rex call", () => {
+    const before = realCalls().length;
+    const snapshot = terminal.liveTargets();
+    assert.equal(snapshot?.rex, undefined);
+    janitor(snapshot);
+    janitor();
+    assert.deepEqual(callsSince(before), []);
+  });
+});
 
 describe("Rex core pane operations", () => {
   it("paste carries metacharacters and 20k chars intact", async () => {
@@ -68,26 +81,68 @@ describe("Rex core pane operations", () => {
     assert.deepEqual(eventsOf(b.block), []);
   });
 
-  it("capture is tail-bounded on a block with 5MB scrollback", () => {
+  it("capture is tail-bounded on a block with 5MB of box-drawing scrollback", () => {
     const b = newBlock("big");
-    const rows = Array.from({ length: 100_000 }, (_, i) => `row ${String(i).padStart(6, "0")} ${"x".repeat(37)}`);
+    const rows = Array.from({ length: 100_000 }, (_, i) => `│ row ${String(i).padStart(6, "0")} ${"─".repeat(13)} │`);
     const file = join(dirs.tmp, "big-screen.txt");
     const content = `${rows.join("\r\n")}\r\n`;
-    assert.equal(Buffer.byteLength(content), 5_000_000);
+    const total = Buffer.byteLength(content);
+    assert.ok(total > 5_000_000, `the fixture must exceed 5MB, got ${total}`);
     writeFileSync(file, content);
     fakeRexDo(dirs.tmp, "setScreenFile", { block_id: b.block, file });
-    const before = realCalls().length;
     const lines = 40;
+    const screen = 24;
+    const before = realCalls().length;
     const out = terminal.capturePane(b.block, lines).split("\n");
-    assert.ok(out.length <= lines, `got ${out.length} lines`);
-    assert.equal(out.at(-1), rows.at(-1));
-    assert.equal(out[0], rows.at(-lines));
+    assert.deepEqual(out, rows.slice(-lines));
     const formats = callsSince(before).map(paramsOf).filter((c) => c?.params.method === "format");
     assert.equal(formats.length, 1);
-    assert.equal(formats[0].params.args.max_bytes, lines * REX_CAPTURE_BYTES_PER_LINE);
+    assert.equal(formats[0].params.args.max_bytes, (screen + lines) * REX_CAPTURE_BYTES_PER_LINE);
     const reads = callsSince(before).map(paramsOf).filter((c) => c?.params.method === "blob_read");
-    assert.ok(reads.length >= 1, "the tail comes from blob_read");
-    assert.ok(reads.every((c) => c.params.args.offset >= 5_000_000 - lines * REX_CAPTURE_BYTES_PER_LINE), "it reads only the tail");
+    assert.equal(reads.length, 1, "the whole tail comes from one blob_read, so a mid-character offset cannot drift");
+    const textBytes = Buffer.from(rows.join("\n"));
+    const textTotal = textBytes.length;
+    assert.equal(textBytes[textTotal - (screen + lines) * REX_CAPTURE_BYTES_PER_LINE] & 0xc0, 0x80, "the tail starts inside a box-drawing character");
+    assert.ok(reads.every((c) => c.params.args.offset >= textTotal - (screen + lines) * REX_CAPTURE_BYTES_PER_LINE), "it reads only the tail");
+    const raw = terminal.captureRawPane(b.block, lines).split("\n");
+    assert.deepEqual(raw, rows.slice(-(screen + lines)), "captureRawPane is the visible screen plus the history lines, like capture-pane -S");
+    assert.ok(!raw.join("").includes("\uFFFD"), "a mid-character offset never leaks a replacement character");
+  });
+
+  it("a reply with an id but no total is read forward to the end", () => {
+    const b = newBlock("no-total");
+    const rows = Array.from({ length: 3000 }, (_, i) => `│ line ${i} ─────────── │`);
+    const file = join(dirs.tmp, "no-total.txt");
+    writeFileSync(file, `${rows.join("\r\n")}\r\n`);
+    fakeRexDo(dirs.tmp, "setScreenFile", { block_id: b.block, file });
+    process.env.FAKE_REX_FORMAT_NO_TOTAL = "1";
+    try {
+      assert.deepEqual(terminal.capturePane(b.block, 10).split("\n"), rows.slice(-10));
+    } finally {
+      delete process.env.FAKE_REX_FORMAT_NO_TOTAL;
+    }
+  });
+
+  it("a tall block with a top-anchored dialog or input box reads the whole visible screen, not its blank bottom rows", () => {
+    const dialog = readFileSync(join(REPO, "test", "fixtures", "panes", "folder-trust-dialog.txt"), "utf8").replace(/\n+$/, "");
+    const tallDialog = newBlock("tall-dialog", ["sleep", "600"], { columns: 120, rows: 80 });
+    fakeRexDo(dirs.tmp, "setScreen", { block_id: tallDialog.block, text: dialog });
+    assert.equal(terminal.paneChoiceCheck(tallDialog.block).awaitingChoice, true);
+    const idle = readFileSync(join(REPO, "test", "fixtures", "rex", "claude-idle.vt"), "utf8");
+    const tallIdle = newBlock("tall-idle", ["sleep", "600"], { columns: 80, rows: 80 });
+    fakeRexDo(dirs.tmp, "setScreen", { block_id: tallIdle.block, text: idle });
+    assert.equal(terminal.inputBoxSnapshot(tallIdle.block)?.box?.state, "ghost");
+    assert.equal(terminal.paneChoiceCheck(tallIdle.block).awaitingChoice, false);
+  });
+
+  it("an empty target.resolve reply is a failed observation, never a closed block", () => {
+    const b = newBlock("empty-resolve");
+    process.env.FAKE_REX_EMPTY_ON = "target.resolve";
+    try {
+      assert.equal(terminal.paneProcessExited(b.block), null);
+    } finally {
+      delete process.env.FAKE_REX_EMPTY_ON;
+    }
   });
 
   it("block moved to another session is still live and receives text", async () => {
@@ -114,7 +169,8 @@ describe("Rex core pane operations", () => {
     const b = newBlock("keys", ["cat"]);
     terminal.sendKeys(b.block, ["Escape", "BTab", "Up", "Down", "Tab"]);
     assert.deepEqual(eventsOf(b.block).map((e) => e.payload.key), ["escape", "shift+tab", "up", "down", "tab"]);
-    assert.throws(() => terminal.sendKeys(b.block, ["NoSuchKey"]), /no Rex key/);
+    assert.throws(() => terminal.sendKeys(b.block, ["Enter", "NoSuchKey"]), /no Rex key/);
+    assert.equal(eventsOf(b.block).length, 5, "an unmapped key refuses the whole list before any key is sent");
   });
 
   it("title reads terminal.title and a closed block's title is null", () => {
@@ -140,6 +196,22 @@ describe("Rex core pane operations", () => {
     const b = newBlock("closer");
     fakeRexDo(dirs.tmp, "transferWindow", { window_id: b.window, session_label: "closer-elsewhere" });
     terminal.killPane(b.block);
+    assert.ok(fake.state().closed.includes(b.block));
+  });
+
+  it("rexStop closes a block whose program exits on ctrl+c without waiting out the timeout", () => {
+    const b = newBlock("stop-exits");
+    const started = Date.now();
+    rexStop(b.block, 5000);
+    assert.ok(Date.now() - started < 4000, "it returned once the program exited");
+    assert.ok(fake.state().closed.includes(b.block));
+  });
+
+  it("rexStop closes a block that ignores ctrl+c once the timeout passes", () => {
+    const b = newBlock("stop-ignores", ["/bin/sh", "-c", "trap '' INT; while :; do sleep 1; done"]);
+    const started = Date.now();
+    rexStop(b.block, 600);
+    assert.ok(Date.now() - started >= 600, "it waited the timeout out");
     assert.ok(fake.state().closed.includes(b.block));
   });
 });
