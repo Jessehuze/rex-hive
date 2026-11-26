@@ -36,8 +36,11 @@ import {
 } from "./tmux.js"; import {
   isRexTarget,
   paneInCopyMode,
+  programStatusBlocks,
+  rowSnapshot,
   sendText,
 } from "./terminal.js";
+import { HELD_REASON_MODAL_CHOICE } from "./wakeSql.js";
 import type { AgentRow } from "./agentRecords.js";
 
 type Method = MessageMethod;
@@ -225,7 +228,8 @@ async function paneFallback(original: DeliveryRow, snapshot?: AliveSnapshot | nu
   const target = db.prepare("SELECT kind, command FROM agents WHERE id = ?").get(row.to_agent_id) as
     | { kind: string; command: string }
     | undefined;
-  const ownership = currentOwnership(row.to_agent_id, identity, snapshot);
+  const observed = snapshot === undefined ? rowSnapshot(identity) : snapshot;
+  const ownership = currentOwnership(row.to_agent_id, identity, observed);
   if (ownership === "unknown") return hold(row, "the lead's pane ownership reads unknown");
   if (ownership !== "live" || target === undefined) {
     return failPending(row, `the lead pane this message was accepted for is ${ownership}; nothing is typed into a replacement`);
@@ -244,6 +248,7 @@ async function paneFallback(original: DeliveryRow, snapshot?: AliveSnapshot | nu
     if (!classifier) return hold(row, "hive cannot classify the lead's screen");
     const choice = classifier.choiceCheck(pane).awaitingChoice;
     if (choice !== false) return hold(row, choice ? "the lead's pane is waiting on a choice" : "the lead's pane could not be read");
+    if (programStatusBlocks(pane, observed)) return hold(row, HELD_REASON_MODAL_CHOICE);
     if (holdsHumanInput(classifier.inputBoxState(pane))) return hold(row, "the lead's input box holds unsubmitted text");
     const latestTarget = db.prepare("SELECT * FROM agents WHERE id = ?").get(row.to_agent_id) as AgentRow | undefined;
     const latestHold = latestTarget ? usageLimitUntil(latestTarget) : null;

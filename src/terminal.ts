@@ -290,6 +290,21 @@ export function liveTargets(): TerminalSnapshot | null {
   return snapshot;
 }
 
+const BLOCKING_STATUS_KINDS = new Set(["permission", "question", "auth"]);
+
+export function programStatusBlocks(target: string, snap: TerminalSnapshot | null | undefined): boolean {
+  if (!isRexTarget(target)) return false;
+  const status = rexOf(snap)?.blocks.get(target)?.status;
+  if (!status) return false;
+  return status.state === "blocked" || (status.kind !== null && BLOCKING_STATUS_KINDS.has(status.kind));
+}
+
+export function rowSnapshot(row: RowPaneIdentity): TerminalSnapshot | undefined {
+  if (!rexRow(row.tmux_socket, row.tmux_target) || row.tmux_target === "") return undefined;
+  const rex = rexSnapshot(rexServerFor(row.tmux_socket, row.tmux_target), [row.tmux_target]);
+  return { panes: new Set(), windows: new Set(), pids: new Map(), rex };
+}
+
 export const foreignSocket = (recorded: string): boolean => (isRexSocket(recorded) ? false : tmuxForeignSocket(recorded));
 
 export function rowOwnership(row: RowPaneIdentity, snapshot?: AliveSnapshot | null): RowOwnership {
