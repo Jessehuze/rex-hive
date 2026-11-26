@@ -193,7 +193,7 @@ import {
   resolveInTmuxTarget,
   rowLive,
   resolveTerminal, rexActive,
-  rowOwnership, terminalOfRow, isRexTarget, rexServerOf,
+  rowOwnership, terminalOfRow, isRexTarget, rexServerOf, rowSubagents,
   serverEnvironment,
   sessionClients,
   setPaneTitle,
@@ -210,7 +210,7 @@ import { collectCrew, crewStoreProblem } from "./crew.js";
 import { resumeWorker, validateResumeWorker } from "./agentResume.js";
 import { markWorkerLost } from "./workerRecovery.js";
 import type { AgentRow } from "./agentRecords.js";
-import { describeProcess, formatLocal, processCounts } from "./dashboard.js";
+import { describeProcess, formatLocal, processCounts, subagentsLabel } from "./dashboard.js";
 import {
   awaitStartedPorts,
   runningCommandRow,
@@ -2498,7 +2498,8 @@ function cmdStatus(): void {
 
       const label = a.kind === "command" ? "cmd  " : a.kind === LEAD_KIND ? "lead " : "agent";
       console.log(`  ${label}  ${a.name.padEnd(20)} ${state}`);
-
+      const subagents = a.kind === "command" || !isRexTarget(a.tmux_target) ? null : subagentsLabel(rowSubagents(a, statusSnapshot()));
+      if (subagents) console.log(`         ${subagents}`);
       if (reportsAgentStateLog(a)) {
         console.log(`         last log event: ${describeLastLogEvent(lastLogEvent(a.actor_id))}`);
       }

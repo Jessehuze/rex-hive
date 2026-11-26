@@ -1,12 +1,12 @@
 import { getProject } from "./context.js";
-import type { ProcessSnapshot } from "./dashboard.js";
+import type { ProcessSnapshot, WorkerSubagents } from "./dashboard.js";
 import { db } from "./db.js";
 import { loadProjectYml } from "./projectYml.js";
 import { closeAgentRow, currentOwnership, killAgentPane, paneIdentity, relayoutAfterPaneLeft } from "./spawn.js";
 import { rexAwaitPorts, rexStopProcess, rexVisibilityAndPorts, rowServer, type RexPort } from "./terminal/rex.js";
 import {
   sessionName,
-  type RowOwnership,
+  type AliveSnapshot, type RowOwnership,
 } from "./tmux.js"; import {
   paneVisibility,
   paneWindow,
@@ -14,7 +14,7 @@ import {
   cancelCopyMode,
   observeRowOwnership,
   paneProcessExited,
-  rowLive, isRexTarget,
+  rowLive, isRexTarget, rowSubagents,
 } from "./terminal.js";
 
 // One derivation for every surface that reports where a project's processes are: `hive status`,
@@ -48,6 +48,19 @@ export function snapshotProcesses(projectId: number): ProcessSnapshot[] {
       .filter((name) => !running.has(name))
       .map((name) => ({ name, running: false, visibility: null, startedAt: null })),
   ];
+}
+
+export function workerSubagents(projectId: number, snapshot: AliveSnapshot | null | undefined): Map<number, WorkerSubagents> {
+  const shown = new Map<number, WorkerSubagents>();
+  if (!snapshot || !(snapshot as { rex?: unknown }).rex) return shown;
+  const rows = db
+    .prepare("SELECT id, tmux_target, tmux_socket FROM agents WHERE project_id = ? AND status = 'running' AND kind != 'command'")
+    .all(projectId) as { id: number; tmux_target: string; tmux_socket: string }[];
+  for (const row of rows) {
+    const subagents = rowSubagents(row, snapshot);
+    if (subagents) shown.set(row.id, subagents);
+  }
+  return shown;
 }
 
 const portNumbers = (ports: RexPort[]): number[] => [...new Set(ports.map((p) => p.port))].sort((a, b) => a - b);

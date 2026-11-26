@@ -528,7 +528,8 @@ function blockMethod(state, params, method, args) {
     case "modes":
       return { screen: "primary", modes: [{ name: "bracketed_paste", number: 2004, ansi: false, set: block.bracketed !== false, default: false }] };
     case "program_status":
-      return { records: block.program_status };
+      if (block.program_status_fails) fail("internal", "program_status failed");
+      return block.program_status_reply ?? { records: block.program_status };
     case "ports":
       return portsReply(block);
     case "resize":
@@ -865,7 +866,7 @@ function snapshot(state, args, code, callerSession) {
         entry.probed = true;
         entry.process = { ...proc };
         if (proc.last_exit === null) delete entry.process.last_exit;
-        entry.program_status = { records: luaJson(b.program_status) };
+        if (!b.program_status_fails) entry.program_status = b.program_status_reply ?? { records: luaJson(b.program_status) };
       }
       blocks[b.block_id] = entry;
     }
@@ -941,6 +942,8 @@ function fakeOp(op, raw) {
         return {};
       case "setProgramStatus":
         state.blocks[args.block_id].program_status = args.records ?? [];
+        state.blocks[args.block_id].program_status_fails = args.fails === true;
+        state.blocks[args.block_id].program_status_reply = args.reply;
         return {};
       case "setClients":
         state.clients = args.clients ?? [];

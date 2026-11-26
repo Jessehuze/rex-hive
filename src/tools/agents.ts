@@ -101,7 +101,7 @@ import {
   observeRowOwnership,
   paneCurrentCommand,
   paneInCopyMode,
-  pollPaneReadiness, programStatusBlocks,
+  pollPaneReadiness, programStatusBlocks, rowSubagents,
   rowLive,
   rowOwnership, rowSnapshot, sendText,
   setRemainOnExit,
@@ -1594,6 +1594,7 @@ export function registerAgents(server: McpServer): void {
             const summary = agentSummary(r, snapshot);
             return {
               ...summary,
+              subagents: rowSubagents(r, snapshot),
               ...(summary.alive !== true ? claudeOnlyFields(r) : {}),
 
               ...paneField(r, summary.alive),
@@ -1633,6 +1634,7 @@ export function registerAgents(server: McpServer): void {
         const briefPath = agentBriefPath(agent.id);
         return {
           ...summary,
+          subagents: rowSubagents(agent, snapshot),
 
           ...(summary.alive === null ? { note: unknownOwnershipNote(snapshot) } : {}),
           closed_at: agent.closed_at,

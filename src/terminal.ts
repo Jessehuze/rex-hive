@@ -20,7 +20,7 @@ import {
   rexSendText,
   rexSnapshot,
   rexTitle,
-  type RexSnapshot,
+  type RexSnapshot, type RexSubagents,
 } from "./terminal/rex.js";
 import {
   cancelCopyMode as tmuxCancelCopyMode,
@@ -296,6 +296,12 @@ export function programStatusBlocks(target: string, snap: TerminalSnapshot | nul
   const status = rexOf(snap)?.blocks.get(target)?.status;
   if (!status) return false;
   return status.state === "blocked" || (status.kind !== null && BLOCKING_STATUS_KINDS.has(status.kind));
+}
+
+export function rowSubagents(row: { tmux_target: string; tmux_socket: string }, snap: AliveSnapshot | null | undefined): RexSubagents | null {
+  if (!rexRow(row.tmux_socket, row.tmux_target)) return null;
+  const rex = rexOf(snap);
+  return rex?.answered ? (rex.blocks.get(row.tmux_target)?.subagents ?? null) : null;
 }
 
 export function rowSnapshot(row: RowPaneIdentity): TerminalSnapshot | undefined {

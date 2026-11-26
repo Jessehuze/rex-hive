@@ -20,6 +20,17 @@ export interface ProcessSnapshot {
 export const portsLabel = (ports: number[] | undefined): string | null =>
   ports && ports.length > 0 ? `ports ${ports.join(", ")}` : null;
 
+export interface WorkerSubagents {
+  count: number;
+  titles: string[];
+}
+
+export function subagentsLabel(s: WorkerSubagents | null | undefined): string | null {
+  if (!s || s.count === 0) return null;
+  const more = s.count > s.titles.length ? `; +${s.count - s.titles.length} more` : "";
+  return `${s.count} subagent${s.count === 1 ? "" : "s"}: ${s.titles.join("; ")}${more}`;
+}
+
 export const describeProcess = (p: ProcessSnapshot): string => {
   const ports = portsLabel(p.ports);
   return ports ? `${describeVisibility(p.visibility)} (${ports})` : describeVisibility(p.visibility);
@@ -215,7 +226,12 @@ function kindEl(a: RunningAgentRow): string {
   return a.kind === a.name ? "" : `<span class="kind">${escapeHtml(a.kind)}</span>`;
 }
 
-function renderWorkerRow(a: RunningAgentRow): string {
+function subagentsEl(s: WorkerSubagents | undefined): string {
+  const label = subagentsLabel(s);
+  return label ? `<span class="worker-meta">${escapeHtml(label)}</span>` : "";
+}
+
+function renderWorkerRow(a: RunningAgentRow, subagents: Map<number, WorkerSubagents>): string {
   if (!hasStateChannel(a.kind)) {
     const last = fetchLastLogEvent(a.actor_id);
     const meta = last
@@ -223,21 +239,21 @@ function renderWorkerRow(a: RunningAgentRow): string {
       : "no log event recorded";
     return (
       `<li class="worker"><span class="worker-head">${mono(a.name)}${kindEl(a)}</span>` +
-      `<span class="worker-meta">${meta}</span></li>`
+      `<span class="worker-meta">${meta}</span>${subagentsEl(subagents.get(a.id))}</li>`
     );
   }
   return (
     `<li class="worker"><span class="worker-head">${agentStateBadge(a)}${mono(a.name)}${kindEl(a)}</span>` +
-    `<span class="worker-meta">since ${shortWhenEl(a.state_changed_at ?? a.created_at)}</span></li>`
+    `<span class="worker-meta">since ${shortWhenEl(a.state_changed_at ?? a.created_at)}</span>${subagentsEl(subagents.get(a.id))}</li>`
   );
 }
 
-function renderNowAgentsLine(agents: RunningAgentRow[]): string {
+function renderNowAgentsLine(agents: RunningAgentRow[], subagents: Map<number, WorkerSubagents>): string {
   if (agents.length === 0) return `<p class="stat-empty">no workers running</p>`;
   const shown = agents.slice(0, AGENT_CAP);
   return (
     capNote(shown.length, agents.length, "running agents") +
-    `<ul class="stat-workers">${shown.map(renderWorkerRow).join("")}</ul>`
+    `<ul class="stat-workers">${shown.map((a) => renderWorkerRow(a, subagents)).join("")}</ul>`
   );
 }
 
@@ -332,7 +348,7 @@ function renderNowProcessesLine(procs: ProcessSnapshot[]): string {
   );
 }
 
-function renderNowStrip(projectId: number, procs: ProcessSnapshot[]): string {
+function renderNowStrip(projectId: number, procs: ProcessSnapshot[], subagents: Map<number, WorkerSubagents>): string {
   const agents = fetchNowAgents(projectId);
   const nextWake = fetchNextWake(projectId);
   const todos = fetchTodoCounts(projectId);
@@ -343,7 +359,7 @@ ${statCard(
   "workers",
   "workers",
   "users",
-  `<p class="stat-figure">${agents.length}</p>${renderNowAgentsLine(agents)}`,
+  `<p class="stat-figure">${agents.length}</p>${renderNowAgentsLine(agents, subagents)}`,
 )}
 ${statCard("wake", "next wake", "clock", renderNowWakeLine(nextWake))}
 ${statCard(
@@ -1571,7 +1587,7 @@ const BRAND_MARK = `<svg class="mark" viewBox="0 0 32 32" role="img" aria-label=
 <path d="M16 11 21 14v6l-5 3-5-3v-6Z" fill="currentColor" fill-opacity="0.22" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
 </svg>`;
 
-function buildDashboard(projectId: number, procs: ProcessSnapshot[]): {
+function buildDashboard(projectId: number, procs: ProcessSnapshot[], subagents: Map<number, WorkerSubagents>): {
   projectName: string;
   sections: string;
   html: string;
@@ -1591,7 +1607,7 @@ function buildDashboard(projectId: number, procs: ProcessSnapshot[]): {
     renderActivitySection(index, projectId),
   ];
   const nav = renderSectionNav(index);
-  const sections = [renderNowStrip(projectId, procs), ...cards].join("\n");
+  const sections = [renderNowStrip(projectId, procs, subagents), ...cards].join("\n");
   const generatedLocal = formatDate(new Date());
 
   const html = `<!doctype html>
@@ -1626,15 +1642,16 @@ ${sections}
   return { projectName: project.name, sections, html };
 }
 
-export function renderDashboard(projectId: number, procs: ProcessSnapshot[] = []): string {
-  return buildDashboard(projectId, procs).html;
+export function renderDashboard(projectId: number, procs: ProcessSnapshot[] = [], subagents: Map<number, WorkerSubagents> = new Map()): string {
+  return buildDashboard(projectId, procs, subagents).html;
 }
 
 export function renderDashboardForWrite(
   projectId: number,
   procs: ProcessSnapshot[] = [],
+  subagents: Map<number, WorkerSubagents> = new Map(),
 ): { html: string; contentHash: string } {
-  const { projectName, sections, html } = buildDashboard(projectId, procs);
+  const { projectName, sections, html } = buildDashboard(projectId, procs, subagents);
   const contentHash = createHash("sha256").update(projectName).update("\0").update(sections).digest("hex");
   return { html, contentHash };
 }
