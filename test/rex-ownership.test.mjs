@@ -222,6 +222,7 @@ describe("Rex row ownership", () => {
       .get(projectId, b.block, `rex:${elsewhere}`, b.pid, dirs.projectDir);
     const before = realCalls().length;
     assert.equal(terminal.paneTitle(b.block), null, "the row's server is down, so the title is unreadable");
+    assert.ok(realCalls().length > before, "the title read asked rex at all");
     assert.ok(realCalls().slice(before).every((c) => c.argv.includes(elsewhere)));
     db.prepare("UPDATE agents SET status = 'closed' WHERE id = ?").run(row.id);
     assert.equal(terminal.paneTitle(b.block), "other-server", "with the row closed the default server answers");

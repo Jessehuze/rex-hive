@@ -377,9 +377,11 @@ describe("fake rex", () => {
     await waitFor(() => relays.every((r) => !alive(r.child_pid) && !alive(r.relay_pid)));
   });
 
-  it("a test process killed by SIGTERM takes its relays with it, through the relay's owner watch", async () => {
+  it("a test process killed by SIGTERM takes its relays with it, through the relay's owner watch", async (t) => {
     const child = spawnBlockChild(mkdtempSync(join(tmp, "sigterm-")));
+    t.after(() => child.proc.kill("SIGKILL"));
     const { relays } = await child.ready;
+    assert.equal(relays.length, 1);
     assert.ok(relays.every((r) => alive(r.relay_pid) && alive(r.child_pid)));
     child.proc.kill("SIGTERM");
     await waitFor(() => relays.every((r) => !alive(r.child_pid) && !alive(r.relay_pid)), { timeoutMs: 4000 });
