@@ -90,9 +90,11 @@ function tmuxImportViolations(rel, text) {
   return found;
 }
 
+const EXEC_CALL = /\("tmux"|\btmux\(|\("rex"/;
+
 function execViolations(rel, text) {
   if (EXEC_ALLOWLIST.includes(rel) || EXEC_ALLOWED_PREFIXES.some((p) => rel.startsWith(p))) return [];
-  return /\("tmux"|\btmux\(|\("rex"/.test(text) ? [rel] : [];
+  return EXEC_CALL.test(text) ? [rel] : [];
 }
 
 const sources = listTs(SRC).map((path) => ({ rel: relative(REPO, path), text: readFileSync(path, "utf8") }));
@@ -118,7 +120,7 @@ describe("rex seam guard", () => {
   });
 
   it("every pending-task-2 file still executes tmux directly", () => {
-    const stale = PENDING_TASK_2.filter((rel) => !sources.some((s) => s.rel === rel && /\("tmux"|\btmux\(|\("rex"/.test(s.text)));
+    const stale = PENDING_TASK_2.filter((rel) => !sources.some((s) => s.rel === rel && EXEC_CALL.test(s.text)));
     assert.deepEqual(stale, []);
   });
 
@@ -147,5 +149,9 @@ describe("rex seam guard", () => {
       assert.equal(tmuxImportViolations("src/x.ts", form).length, 1, form);
     }
     assert.equal(execViolations("src/x.ts", 'execFileSync("rex", [])').length, 1);
+    assert.equal(execViolations("src/x.ts", 'spawnSync("tmux", [])').length, 1);
+    assert.equal(execViolations("src/x.ts", 'tmux("kill-pane")').length, 1);
+    assert.equal(execViolations("src/terminal.ts", 'spawnSync("tmux", [])').length, 0);
+    assert.equal(execViolations("src/terminal.ts", 'tmux("kill-pane")').length, 0);
   });
 });
