@@ -31,10 +31,10 @@ chmodSync(join(BIN, "claude"), 0o755);
 const CLAUDE = join(BIN, "claude");
 const NO_SCHEDULER = { HIVE_SCHEDULER_INTERVAL_MS: "2147483647" };
 
-const ROOT = { state: "working", app: "claude-code", effective_app: "claude-code", updated_at: "2026-11-26T10:00:00Z", owner: { pid: 4242, name: "claude" } };
+const ROOT = { state: "working", app: "claude-code", effective_app: "claude-code", updated_at: "2000-01-01T00:00:00Z", owner: { pid: 4242, name: "claude" } };
 const child = (id, title) => ({ id, state: "working", ...(title === undefined ? {} : { title }), app: "claude-code", effective_app: "claude-code", owner: { pid: 4243, name: "claude" } });
-const SUBAGENT = child("a800f5df92e0980e1", "nap-two sleep 30");
-const SHELL = child("bmno4m7zd", "Sleep 45 seconds in background");
+const SUBAGENT = child("a0f1e2d3c4b5a6978", "review the parser");
+const SHELL = child("bx7k2q9pz", "Run the build in background");
 
 let projectId;
 let projectDir;
@@ -59,6 +59,7 @@ after(async () => {
 
 const realCalls = () => fake.calls().filter((c) => c.argv[0] !== "__fake");
 const setStatus = (block, records, extra = {}) => fakeRexDo(dirs.tmp, "setProgramStatus", { block_id: block, records, ...extra });
+const setRawReply = (block, reply) => fakeRexDo(dirs.tmp, "setProgramStatus", { block_id: block, reply });
 
 function newBlock(label) {
   const made = rexApi(REX_ADDR, "session.create", {
@@ -102,7 +103,7 @@ describe("Rex subagent display in agent_status and agent_list", () => {
     setStatus(b.block, [{ ...ROOT, msg: "2 shells still running" }, SUBAGENT, SHELL, child("parent/child-1", "nested one"), child("untitled-9")]);
     const status = await c.call("agent_status", { name: "subs" });
     assert.equal(status.alive, true, JSON.stringify(status));
-    assert.deepEqual(status.subagents, { count: 4, titles: ["nap-two sleep 30", "Sleep 45 seconds in background", "nested one", "untitled-9"] });
+    assert.deepEqual(status.subagents, { count: 4, titles: ["review the parser", "Run the build in background", "nested one", "untitled-9"] });
     const listed = (await c.call("agent_list")).agents.find((a) => a.name === "subs");
     assert.deepEqual(listed.subagents, status.subagents);
 
@@ -110,6 +111,10 @@ describe("Rex subagent display in agent_status and agent_list", () => {
     assert.deepEqual((await c.call("agent_status", { name: "subs" })).subagents, { count: 0, titles: [] });
     setStatus(b.block, []);
     assert.deepEqual((await c.call("agent_status", { name: "subs" })).subagents, { count: 0, titles: [] }, "a read with no records at all is zero, not unknown");
+    setRawReply(b.block, { status: "ok" });
+    assert.equal((await c.call("agent_status", { name: "subs" })).subagents, null, "a reply with no records list is unknown, not zero");
+    setRawReply(b.block, { records: "garbled" });
+    assert.equal((await c.call("agent_status", { name: "subs" })).subagents, null, "a records value that is not a list is unknown, not zero");
     closeRow(row);
   });
 
@@ -169,15 +174,28 @@ describe("Rex subagent display in agent_status and agent_list", () => {
     closeRow(row);
   });
 
+  it("a long title is cut on code points, never splitting a surrogate pair", async () => {
+    const b = newBlock("emoji");
+    const row = insertRow({ ...b, name: "emoji" });
+    const c = await client();
+    setStatus(b.block, [ROOT, child("e1", `${"y".repeat(78)}\u{1F600}\u{1F600}\u{1F600}`)]);
+    const [title] = (await c.call("agent_status", { name: "emoji" })).subagents.titles;
+    assert.equal(Array.from(title).length, 80, JSON.stringify(title));
+    assert.equal(title, `${"y".repeat(78)}\u{1F600}…`);
+    assert.doesNotMatch(title, /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/);
+    closeRow(row);
+  });
+
   it("a title's control characters are shown as plain text, never passed through", async () => {
     const b = newBlock("ctl");
     const row = insertRow({ ...b, name: "ctl" });
     const c = await client();
-    setStatus(b.block, [ROOT, child("c1", "red\u001b[31m text\nnext")]);
+    setStatus(b.block, [ROOT, child("c1", "red\u001b[31m text\nnext"), child("c2-only-controls", "\u001b\u0007\n\t")]);
     const { subagents } = await c.call("agent_status", { name: "ctl" });
-    assert.equal(subagents.titles.length, 1);
+    assert.equal(subagents.titles.length, 2);
     assert.doesNotMatch(subagents.titles[0], /[\u0000-\u001f\u007f]/);
     assert.match(subagents.titles[0], /red.*text.*next/);
+    assert.equal(subagents.titles[1], "c2-only-controls", "a title of only control characters falls back to the id");
     closeRow(row);
   });
 });
@@ -207,7 +225,7 @@ describe("Rex subagent display in hive status", () => {
       assert.ok(at >= 0, `hive status lists ${name}:\n${result.stdout}`);
       return lines[at + 1] ?? "";
     };
-    assert.match(after("busy"), /^ {9}2 subagents: nap-two sleep 30; Sleep 45 seconds in background$/);
+    assert.match(after("busy"), /^ {9}2 subagents: review the parser; Run the build in background$/);
     assert.doesNotMatch(after("quiet"), /subagents/);
     assert.doesNotMatch(after("tmuxonly"), /subagents/);
     assert.equal(lines.filter((l) => /subagents?:/.test(l)).length, 1, result.stdout);

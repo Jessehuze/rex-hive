@@ -330,10 +330,16 @@ function readProcess(reply: ProcessReply | null | undefined) {
 
 const isChild = (r: StatusRecord): boolean => r.id !== undefined && r.id !== null && r.id !== "";
 
+const plainText = (value: string): string => value.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").trim();
+
 function subagentTitle(r: StatusRecord): string {
-  const text = (typeof r.title === "string" && r.title.trim() !== "" ? r.title : String(r.id)).replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").trim();
-  return text.length > SUBAGENT_TITLE_MAX_CHARS ? `${text.slice(0, SUBAGENT_TITLE_MAX_CHARS - 1)}…` : text;
+  const title = typeof r.title === "string" ? plainText(r.title) : "";
+  const points = Array.from(title !== "" ? title : plainText(String(r.id)));
+  return points.length > SUBAGENT_TITLE_MAX_CHARS ? `${points.slice(0, SUBAGENT_TITLE_MAX_CHARS - 1).join("")}…` : points.join("");
 }
+
+const recordsRead = (records: unknown): boolean =>
+  Array.isArray(records) || (records !== null && typeof records === "object" && Object.keys(records).length === 0);
 
 function readStatus(reply: { records?: StatusRecord[] | Record<string, never> } | null | undefined) {
   const records = Array.isArray(reply?.records) ? reply.records : [];
@@ -341,7 +347,7 @@ function readStatus(reply: { records?: StatusRecord[] | Record<string, never> } 
   const children = records.filter(isChild);
   return {
     status: root ? { state: root.state ?? "idle", kind: root.kind ?? null, msg: root.msg ?? null } : null,
-    subagents: reply && typeof reply === "object" ? { count: children.length, titles: children.slice(0, SUBAGENT_TITLES_MAX).map(subagentTitle) } : null,
+    subagents: recordsRead(reply?.records) ? { count: children.length, titles: children.slice(0, SUBAGENT_TITLES_MAX).map(subagentTitle) } : null,
   };
 }
 
