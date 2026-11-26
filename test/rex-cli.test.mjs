@@ -245,6 +245,35 @@ describe("rex CLI wrapper", () => {
     assert.equal(snap.blocks[other.block].process, undefined);
   });
 
+  it("the snapshot script attaches each session before listing it, so blocks in every session are probed", async () => {
+    const { rexLua, SNAPSHOT_SCRIPT } = await cli();
+    const a = await newBlock(["sleep", "30"], "attach-a");
+    const b = await newBlock(["sleep", "30"], "attach-b");
+    const snap = rexLua(REX_ADDR, SNAPSHOT_SCRIPT, { blocks: [a.block, b.block] });
+    assert.equal(snap.incomplete, false);
+    assert.equal(snap.blocks[a.block].probed, true);
+    assert.equal(snap.blocks[b.block].probed, true);
+  });
+
+  it("without the per-session attach the fake, like real Rex, lists only the caller's session and reports incomplete", async () => {
+    const { rexLua, SNAPSHOT_SCRIPT } = await cli();
+    const a = await newBlock(["sleep", "30"], "unattached");
+    const unattached = SNAPSHOT_SCRIPT.replace(/^.*rex\.session\.attach.*$/m, "  local attach_err = nil");
+    assert.notEqual(unattached, SNAPSHOT_SCRIPT, "the attach line was removed");
+    const snap = rexLua(REX_ADDR, unattached, { blocks: [a.block] });
+    assert.equal(snap.incomplete, true);
+    assert.equal(snap.blocks[a.block], undefined);
+  });
+
+  it("an exited block's process has last_exit and no child, as on real Rex", async () => {
+    const { rexApi, rexLua, SNAPSHOT_SCRIPT } = await cli();
+    const b = await newBlock(["/bin/sh", "-c", "exit 3"], "exited-shape");
+    await waitFor(() => rexApi(REX_ADDR, "block.method", { session_id: b.session, block_id: b.block, method: "process", args: {} }).last_exit);
+    const proc = rexLua(REX_ADDR, SNAPSHOT_SCRIPT, { blocks: [b.block] }).blocks[b.block].process;
+    assert.deepEqual(Object.keys(proc).sort(), ["home", "last_exit"]);
+    assert.equal(proc.last_exit.exit_code, 3);
+  });
+
   it("rexLua refuses any script but the hive snapshot on the fake", async () => {
     const { rexLua, RexError } = await cli();
     assert.throws(() => rexLua(REX_ADDR, 'return rex.call("session.list")'), RexError);

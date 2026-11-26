@@ -8,8 +8,8 @@ These are real screens of Claude Code running in a Rex block, captured with `rex
 
 | File | Screen | Expected classification | `program_status` root record at capture |
 |---|---|---|---|
-| `claude-idle.vt` | input box, empty prompt | input box `empty` | `idle` |
-| `claude-typing.vt` | input box with unsubmitted text | input box `human-text` | `idle` |
+| `claude-idle.vt` | input box, empty prompt | input box `ghost` (Claude's dim placeholder; nobody typed it) | `idle` |
+| `claude-typing.vt` | input box with unsubmitted text | input box `pending` | `idle` |
 | `claude-dialog.vt` | Bash permission dialog ("Do you want to proceed?") | awaiting a choice | `blocked`, kind `permission`, msg `approve Bash: touch made-by-fixture.txt` |
 | `claude-trust-dialog.vt` | workspace trust dialog | awaiting a choice | `blocked`, kind `permission`, msg `trust this folder` |
 

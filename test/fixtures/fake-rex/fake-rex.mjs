@@ -8,6 +8,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const RELAY = join(HERE, "relay.mjs");
 const TERMINAL = "com.superlogical.terminal";
 const SNAPSHOT_HEADER = "-- hive:snapshot v1";
+const FAKE_HOME = "/home/fake-user";
 
 class ApiError extends Error {
   constructor(code, message) {
@@ -290,7 +291,8 @@ function processInfo(block) {
   const proc = block.child_pid && !exit
     ? { pid: block.child_pid, name: basename(block.command[0]), argv0: block.command[0], path: block.command[0], invoked_path: block.command[0], cwd: block.cwd, user: process.env.USER ?? "", user_id: process.getuid?.() ?? 0 }
     : null;
-  return { child: proc, foreground: proc, ancestors: [], home: process.env.HOME ?? "", last_exit: exit };
+  if (exit) return { home: FAKE_HOME, last_exit: exit };
+  return proc ? { child: proc, foreground: proc, home: FAKE_HOME, last_exit: null } : { home: FAKE_HOME, last_exit: null };
 }
 
 function feed(block, text) {
@@ -558,25 +560,34 @@ function apiCall(state, method, params) {
 
 const luaJson = (value) => (Array.isArray(value) && value.length === 0 ? {} : value);
 
-function snapshot(state, args) {
+function attachesEachSession(code) {
+  const attach = code.search(/rex\.session\.attach\s*[{(]/);
+  return attach >= 0 && attach < code.indexOf("session.list_blocks");
+}
+
+function snapshot(state, args, code, callerSession) {
   const wanted = new Set(args?.blocks ?? []);
   const blocks = {};
+  const attaches = attachesEachSession(code);
+  let incomplete = false;
   for (const s of state.sessions) {
+    if (!attaches && s.session_id !== callerSession && s.label !== callerSession) {
+      incomplete = true;
+      continue;
+    }
     for (const b of Object.values(state.blocks).filter((x) => x.session_id === s.session_id)) {
       const entry = { session_id: s.session_id, session_label: s.label ?? "", window_id: b.window_id ?? "", label: b.label ?? "", placement: b.window_id ? "placed" : "detached", probed: false };
       if (wanted.has(b.block_id)) {
         const proc = processInfo(b);
         entry.probed = true;
-        entry.process = { ...proc, ancestors: luaJson(proc.ancestors) };
+        entry.process = { ...proc };
         if (proc.last_exit === null) delete entry.process.last_exit;
-        if (proc.child === null) delete entry.process.child;
-        if (proc.foreground === null) delete entry.process.foreground;
         entry.program_status = { records: luaJson(b.program_status) };
       }
       blocks[b.block_id] = entry;
     }
   }
-  return { version: 1, incomplete: false, blocks };
+  return { version: 1, incomplete, blocks };
 }
 
 function parseParams(raw) {
@@ -779,7 +790,7 @@ function main(argv) {
     case "do": {
       const f = flags(tail, { "-e": "code", "--eval": "code", "--json": "json?", "-s": "session", "-b": "block", "--args": "args" });
       if (typeof f.code !== "string" || f.code.split("\n")[0] !== SNAPSHOT_HEADER) fail("bad_request", "the fake runs only the hive snapshot script");
-      const snap = snapshot(readState(), f.args ? parseParams(f.args) : {});
+      const snap = snapshot(readState(), f.args ? parseParams(f.args) : {}, f.code, f.session ?? process.env.REX_SESSION ?? "");
       if (f.json) emit(snap);
       else process.stdout.write(`${JSON.stringify(snap, null, 2)}\n`);
       return 0;

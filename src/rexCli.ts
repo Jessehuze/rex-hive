@@ -152,7 +152,9 @@ if not listed then error("session.list failed: " .. tostring(err)) end
 local blocks = {}
 local incomplete = false
 for _, s in ipairs(listed.sessions or {}) do
-  local held = rex.call("session.list_blocks", { session_id = s.session_id })
+  local _, attach_err = rex.session.attach{ session_id = s.session_id }
+  local held = nil
+  if attach_err == nil then held = rex.call("session.list_blocks", { session_id = s.session_id }) end
   if not held then
     incomplete = true
   else
