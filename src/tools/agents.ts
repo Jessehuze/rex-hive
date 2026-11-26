@@ -66,6 +66,7 @@ import {
   releaseParkRow,
   relayoutAfterPaneLeft,
   renameAgent,
+  rexLeadFor,
   storedLaunchOptions,
 } from "../spawn.js";
 import { COMMAND_KIND, runningCommandRow, stopLine, stopProcess, STOP_REASONS } from "../processes.js";
@@ -93,7 +94,7 @@ import {
   capturePane,
   captureFinalScreen,
   cancelCopyMode,
-  ensureAttached,
+  ensureAttached, isRexTarget,
   paneWindow,
   sendKeys,
   liveTargets,
@@ -742,6 +743,7 @@ export function registerAgents(server: McpServer): void {
           cwd,
           profile: activeProfile(projectConfig),
           vars: mergedBriefVars(projectConfig?.vars, harness.name),
+          rex: rexLeadFor(project.id, parent) !== null,
         });
         // Minted before the agent row exists (unlike agentId/actorId), so CODEX_HOME's own path can
         // go straight into launchAgent's static env below rather than needing agentId to name it.
@@ -818,7 +820,7 @@ export function registerAgents(server: McpServer): void {
         let exited = false;
         let exitTail: string | undefined;
         try {
-          ensureAttached(sessionName());
+          if (!isRexTarget(target)) ensureAttached(sessionName());
           if (harness.classifiesPaneScreen) {
             const classifier = harness.paneClassifier!;
             try {
@@ -1207,7 +1209,7 @@ export function registerAgents(server: McpServer): void {
         const project = resolveProject(args.project_id);
         const agent = findClosedAgent(project.id, args);
         const receipt = await resumeWorker(project.id, agent.id, { parentActor: currentActor() });
-        ensureAttached(sessionName());
+        if (!isRexTarget(receipt.tmux_target)) ensureAttached(sessionName());
         return receipt;
       }),
   );

@@ -2,9 +2,9 @@ import { findProjectForCwd } from "./context.js";
 import { db } from "./db.js";
 import { loadProjectYml } from "./projectYml.js";
 import { registerRexInUse, resolveTerminal } from "./terminal.js";
-import { registerRexStore } from "./terminal/rex.js";
+import { REX_IN_USE_KEY, registerRexStore } from "./terminal/rex.js";
 
-export const REX_IN_USE_KEY = "terminal:rex:in-use";
+export { REX_IN_USE_KEY };
 
 export function rexInUse(): boolean {
   const flagged = db

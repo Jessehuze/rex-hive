@@ -139,7 +139,7 @@ import {
   type InputBoxState, type RowOwnership,
   type RowPaneIdentity,
 } from "./tmux.js"; import {
-  callerSocket,
+  callerTmuxSocket,
   capturePane,
   foreignSocket,
   liveTargets,
@@ -378,7 +378,7 @@ function recordTeardown(snapshot: AliveSnapshot, swept: CrewRowForRecord[]): Tea
     const observed = sightingIsFresh && socketLastSeenAlive! > newestEvidence;
     const record: TeardownRecord = {
       detected_at: detectedAt,
-      socket: callerSocket(),
+      socket: callerTmuxSocket(),
       trigger: TEARDOWN_TRIGGER,
       attribution: NOT_ATTRIBUTED,
       window: teardownWindow(

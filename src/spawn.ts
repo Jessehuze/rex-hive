@@ -22,7 +22,7 @@ import {
   type RowOwnership, type WindowLayout,
   type RowPaneIdentity,
 } from "./tmux.js"; import {
-  applyLayout, callerSocket,
+  applyLayout, callerTmuxSocket, isRexTarget, terminalOfRow,
   claimInitialWindow, createWindow,
   ensureSession, crossServerRefusal,
   findProcessesWindow, findProjectWindow,
@@ -42,6 +42,7 @@ import {
   waitForPaneEstablished,
   rowOwnership,
 } from "./terminal.js";
+import { commandArgv, envFromFlags, rexCreatePane, rexRefuseQuickExit, startProcess as refuseRexProcess } from "./terminal/rex.js";
 
 export function withWindowClaim<T>(claim: () => T): T {
   if (db.inTransaction) {
@@ -150,6 +151,7 @@ function recordPane(agentId: number, target: string, socket: string, pid: string
 // The creation pid proves the pane existed, not that its process still runs. A retained pane is
 // left to the caller's readiness wait, which reports the exit with its tail.
 function refuseIfExitedImmediately(target: string, retained: boolean): void {
+  if (isRexTarget(target)) return retained ? undefined : rexRefuseQuickExit(target);
   if (retained || paneProcessExited(target) !== true) return;
   discardOrphanedPane(target);
   throw new Error(
@@ -240,6 +242,41 @@ export function upsertActor(actorId: string, name: string, kind: string): void {
   ).run(actorId, name, kind);
 }
 
+export function rexLeadFor(projectId: number, parentActor: string): { tmux_target: string; tmux_socket: string } | null {
+  const row = (db
+    .prepare("SELECT tmux_target, tmux_socket FROM agents WHERE actor_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1")
+    .get(parentActor) ??
+    db
+      .prepare("SELECT tmux_target, tmux_socket FROM agents WHERE project_id = ? AND kind = ? AND status = 'running' ORDER BY id DESC LIMIT 1")
+      .get(projectId, LEAD_KIND)) as { tmux_target: string; tmux_socket: string } | undefined;
+  return row && terminalOfRow(row) === "rex" ? row : null;
+}
+
+type PlacedPane = {
+  target: string; pid: string; landedInProjectId: number | null; layoutApplied: boolean; inProcessesWindow: boolean; socket?: string;
+};
+
+function placeRexPane(
+  spec: Pick<LaunchSpec, "projectId" | "projectName" | "name" | "cwd" | "placement" | "retainOnExit">,
+  lead: { tmux_target: string },
+  envFlags: string[],
+  commandString: string,
+): PlacedPane {
+  if (spec.placement === "processes") refuseRexProcess();
+  const placed = withWindowClaim(() => rexCreatePane({
+    projectId: spec.projectId,
+    projectName: spec.projectName,
+    label: `${spec.projectName}/${spec.name}`,
+    cwd: spec.cwd,
+    env: envFromFlags(envFlags),
+    argv: commandArgv(commandString),
+    placement: spec.placement === "window" ? "window" : "split",
+    beside: lead.tmux_target,
+    retainOnExit: spec.retainOnExit ?? false,
+  }));
+  return { target: placed.target, pid: placed.pid, socket: placed.socket, landedInProjectId: null, layoutApplied: false, inProcessesWindow: false };
+}
+
 function placeAgentPane(
   session: string,
   spec: Pick<
@@ -258,7 +295,9 @@ function placeAgentPane(
   commandString: string,
   title: string,
   onRetainArmed: (window: string) => void = () => {},
-): { target: string; pid: string; landedInProjectId: number | null; layoutApplied: boolean; inProcessesWindow: boolean } {
+): PlacedPane {
+  const rexLead = rexLeadFor(spec.projectId, spec.parentActor);
+  if (rexLead) return placeRexPane(spec, rexLead, envFlags, commandString);
   let landedInProjectId: number | null = null;
   let layoutApplied = false;
   let inProcessesWindow = false;
@@ -338,7 +377,7 @@ export function launchAgent(spec: LaunchSpec): {
 
   if (untrustedTmuxServer()) throw crossServerRefusal("spawn");
 
-  const socket = callerSocket();
+  const socket = callerTmuxSocket();
   let info;
   try {
     info = db
@@ -400,7 +439,7 @@ export function launchAgent(spec: LaunchSpec): {
     refuseIfExitedImmediately(target, spec.retainOnExit ?? false);
     paneUp = true;
 
-    if (!recordPane(agentId, target, socket, pid)) {
+    if (!recordPane(agentId, target, placed.socket ?? socket, pid)) {
       discardOrphanedPane(target);
       throw paneRacedRetirement(agentId);
     }
@@ -476,7 +515,7 @@ export function resumeAgent(
 ): { target: string; landedInProjectId: number | null } {
 
   if (untrustedTmuxServer()) throw crossServerRefusal("resume");
-  const socket = callerSocket();
+  const socket = callerTmuxSocket();
 
   let flip: { before: Record<string, string | null> | undefined; changes: number };
 
@@ -524,7 +563,7 @@ export function resumeAgent(
     refuseIfExitedImmediately(target, false);
     paneUp = true;
 
-    if (!recordPane(spec.agentId, target, socket, pid)) {
+    if (!recordPane(spec.agentId, target, placed.socket ?? socket, pid)) {
       discardOrphanedPane(target);
       throw paneRacedRetirement(spec.agentId);
     }

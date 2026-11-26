@@ -9,7 +9,7 @@ import { ensureLeadHooksFile } from "./hooks.js";
 import { appendClaudeLeadArgs, crewPluginDir, isTrusted, leadIdentityEnv, renderLeadPosture } from "./leadLaunch.js";
 import { leadSidebarEnabled, loadProjectYml, quietMessagingEnabled } from "./projectYml.js";
 import { buildEnvFlags } from "./spawn.js";
-import { shellQuote, TmuxError, TmuxTimeoutError } from "./tmux.js"; import { callerPane, panePidForRecord, respawnPane, rowOwnership } from "./terminal.js";
+import { shellQuote, TmuxError, TmuxTimeoutError } from "./tmux.js"; import { callerPane, panePidForRecord, respawnPane, rowOwnership, terminalOfRow } from "./terminal.js"; import { rexRefusal } from "./terminal/rex.js";
 import {
   automationBlocker,
   armManualHandoff,
@@ -90,6 +90,7 @@ export async function cmdLeadHandoff(argv: string[]): Promise<number> {
   const actor = process.env.HIVE_AGENT_ID ?? "";
   const lead = process.env.HIVE_LEAD === "1" ? runningLeadByActor(actor) : undefined;
   if (lead === undefined) return refuse("only a running lead can hand itself off");
+  if (terminalOfRow(lead) === "rex") return refuse(rexRefusal("lead handoff"));
   if (callerPane() !== lead.tmux_target || rowOwnership(lead) !== "live") {
     return refuse("this is not running in the lead's own recorded pane");
   }
