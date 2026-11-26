@@ -537,6 +537,19 @@ function sendKey(block, key) {
   }
 }
 
+function portsReply(block) {
+  const ports = Date.now() >= (block.ports_at ?? 0) ? block.ports ?? [] : [];
+  const pids = [...new Set(ports.map((p) => p.pid).filter((pid) => pid !== undefined))].sort((a, b) => a - b);
+  const describe = (list) => pids.filter((pid) => list.some((p) => p.pid === pid)).map((pid) => ({ pid, user_id: process.getuid?.() ?? 0, name: "node" }));
+  const status = block.ports_status ?? "ok";
+  const keep = block.ports_keep;
+  if (keep === undefined || ports.length <= keep) return { status, ports, processes: describe(ports) };
+  const id = (block.blob_seq = (block.blob_seq ?? 0) + 1);
+  writeFileSync(join(block.dir, `blob-${id}`), JSON.stringify({ status, ports, processes: describe(ports) }));
+  const head = ports.slice(0, keep);
+  return { id, status, ports: head, processes: describe(head), truncated: true };
+}
+
 function blockMethod(state, params, method, args) {
   const block = requireBlock(state, params);
   switch (method) {
@@ -567,7 +580,7 @@ function blockMethod(state, params, method, args) {
     case "program_status":
       return { records: block.program_status };
     case "ports":
-      return { status: "ok", ports: block.ports, processes: [], truncated: false };
+      return portsReply(block);
     case "resize":
       block.size = { columns: args?.columns ?? block.size.columns, rows: args?.rows ?? block.size.rows };
       return {};
@@ -661,6 +674,8 @@ const SCHEMAS = {
   "session.resize_pane": { keys: ["after_block_id", "before_block_id", "direction", "ratio", "session_id"], required: ["session_id", "direction", "before_block_id", "after_block_id", "ratio"] },
   "session.view": { keys: ["session_id"], required: ["session_id"] },
   "session.focus_block": { keys: ["block_id", "session_id"], required: ["session_id", "block_id"] },
+  "client.list": { keys: ["kinds", "session_id"], required: [] },
+  "client.perform": { keys: ["action", "args", "block_id", "client_id", "origin", "session_id", "timeout_ms"], required: ["client_id", "action"] },
 };
 
 const checkRatio = (ratio) => {
@@ -861,9 +876,16 @@ function apiCall(state, method, params) {
     case "block.method":
       if (!params.block_id) fail("bad_request", "block_id is required");
       return blockMethod(state, params, String(params.method ?? "").replace(`${TERMINAL}.`, ""), params.args ?? {});
-    case "client.perform":
-      state.performed.push({ client_id: params.client_id, action: params.action, args: params.args ?? null });
-      return { performed_by: params.client_id ?? "client:fake", result: null };
+    case "client.list": {
+      const clients = (state.clients ?? []).filter((c) => !params.kinds?.length || params.kinds.includes(c.info?.kind));
+      return { clients: clients.filter((c) => !params.session_id || (c.session_ids ?? []).includes(params.session_id)) };
+    }
+    case "client.perform": {
+      if (!(state.clients ?? []).some((c) => c.client_id === params.client_id)) fail("not_found", `no client ${params.client_id} is connected`);
+      if (state.perform_error) fail(state.perform_error, `client ${params.client_id} did not perform ${params.action}`);
+      state.performed.push({ client_id: params.client_id, action: params.action, args: params.args ?? null, session_id: params.session_id ?? null });
+      return { performed_by: params.client_id };
+    }
     default:
       fail("method_not_found", `the fake does not implement ${method}`);
   }
@@ -974,9 +996,19 @@ function fakeOp(op, raw) {
       case "setProgramStatus":
         state.blocks[args.block_id].program_status = args.records ?? [];
         return {};
-      case "setPorts":
-        state.blocks[args.block_id].ports = args.ports ?? [];
+      case "setClients":
+        state.clients = args.clients ?? [];
+        state.perform_error = args.perform_error ?? null;
         return {};
+      case "setPorts": {
+        const block = state.blocks[args.block_id];
+        const pid = block.child_pid ?? undefined;
+        block.ports = (args.ports ?? []).map((p) => ({ address: "127.0.0.1", protocol: "tcp", first_seen_at: new Date().toISOString(), ...(pid === undefined ? {} : { pid }), ...p }));
+        block.ports_at = Date.now() + (args.after_ms ?? 0);
+        block.ports_status = args.status ?? "ok";
+        block.ports_keep = args.keep;
+        return {};
+      }
       default:
         fail("bad_request", `unknown fake op ${op}`);
     }

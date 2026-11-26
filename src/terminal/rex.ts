@@ -1164,19 +1164,107 @@ export function rexUnfloat(target: string, leadTarget: string, placement: "split
 
 export type RexVisibility = "shown" | "hidden" | "window";
 
+function visibilityIn(view: SessionView, target: string, leadTarget: string | null): RexVisibility | null {
+  const mine = placeOf(view, target);
+  if (!mine) return null;
+  if (mine.floating) return "hidden";
+  const lead = leadTarget ? placeOf(view, leadTarget) : null;
+  return lead && lead.window !== mine.window ? "window" : "shown";
+}
+
 export function rexVisibility(target: string, leadTarget: string | null, server?: string): RexVisibility | null {
   try {
     const resolved = requireServer(target, server);
-    const view = sessionView(resolved, rexSessionOf(resolved, target));
-    const mine = placeOf(view, target);
-    if (!mine) return null;
-    if (mine.floating) return "hidden";
-    const lead = leadTarget ? placeOf(view, leadTarget) : null;
-    return lead && lead.window !== mine.window ? "window" : "shown";
+    return visibilityIn(sessionView(resolved, rexSessionOf(resolved, target)), target, leadTarget);
   } catch {
     return null;
   }
 }
+
+export interface RexPort {
+  port: number;
+  address: string;
+}
+
+interface PortsReply {
+  id?: number;
+  status?: string;
+  truncated?: boolean;
+  ports?: { port?: unknown; address?: unknown; protocol?: unknown }[];
+}
+
+function readPortsReply(server: string, session: string, block: string): PortsReply {
+  const head = blockMethod<PortsReply>(server, session, block, "ports");
+  if (head.truncated !== true || head.id === undefined) return head;
+  return guarded(() => JSON.parse(readForward(server, session, block, head.id as number, 0)) as PortsReply, head);
+}
+
+function tcpListeners(reply: PortsReply): RexPort[] | "unsupported" | null {
+  if (reply.status === "unsupported") return "unsupported";
+  if (!Array.isArray(reply.ports)) return null;
+  return reply.ports
+    .filter((p) => p.protocol === "tcp" && Number.isInteger(p.port) && typeof p.address === "string")
+    .map((p) => ({ port: p.port as number, address: p.address as string }));
+}
+
+const readPorts = (server: string, session: string, target: string): RexPort[] | "unsupported" | null =>
+  guarded(() => tcpListeners(readPortsReply(server, session, target)), null);
+
+const portsIn = (server: string, session: string, target: string): RexPort[] | null => {
+  const read = readPorts(server, session, target);
+  return read === "unsupported" ? null : read;
+};
+
+export function rexPorts(target: string, server?: string): RexPort[] | null {
+  if (!target.startsWith("block:")) return null;
+  try {
+    const resolved = requireServer(target, server);
+    return portsIn(resolved, rexSessionOf(resolved, target), target);
+  } catch {
+    return null;
+  }
+}
+
+export function rexVisibilityAndPorts(target: string, server?: string): { visibility: RexVisibility | null; ports: RexPort[] | null } {
+  try {
+    const resolved = requireServer(target, server);
+    const session = rexSessionOf(resolved, target);
+    const view = sessionView(resolved, session);
+    return { visibility: visibilityIn(view, target, null), ports: portsIn(resolved, session, target) };
+  } catch {
+    return { visibility: null, ports: null };
+  }
+}
+
+export const REX_PORT_POLL_MS = 250;
+const REX_PORT_PROBE_EVERY = 4;
+
+export type RexPortWait = { ports: RexPort[] } | { stopped: "exited" | "unsupported" | "timeout" };
+
+const portWanted = (ports: RexPort[], want: number | true): boolean => (want === true ? ports.length > 0 : ports.some((p) => p.port === want));
+
+export function rexAwaitPorts(target: string, want: number | true, timeoutMs = 60_000, server?: string): RexPortWait {
+  const deadline = Date.now() + timeoutMs;
+  let session: string | null = null;
+  for (let miss = 0; ; miss++) {
+    const resolved = guarded(() => requireServer(target, server), null);
+    if (resolved && session === null) session = guarded(() => rexSessionOf(resolved, target), null);
+    const read = resolved && session ? readPorts(resolved, session, target) : null;
+    if (read === "unsupported") return { stopped: "unsupported" };
+    if (read && portWanted(read, want)) return { ports: read };
+    if (read === null) session = null;
+    if (miss % REX_PORT_PROBE_EVERY === 0 && miss > 0) {
+      const probe = rexProbe(target, server);
+      if (probe.exited || probe.live === false) return { stopped: "exited" };
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return { stopped: "timeout" };
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(REX_PORT_POLL_MS, remaining));
+  }
+}
+
+export const waitForPort = (target: string, want: number | true, timeoutMs = 60_000, server?: string): boolean =>
+  "ports" in rexAwaitPorts(target, want, timeoutMs, server);
 
 type Direction = "horizontal" | "vertical";
 
@@ -1277,7 +1365,7 @@ export function rexLayoutProject(projectId: number, layout: WindowLayout): { lin
   };
 }
 
-export const rexProjectLead = (projectId: number): { tmux_target: string; tmux_socket: string } | null =>
+export const rexProjectLead = (projectId: number): { tmux_target: string; tmux_socket: string; pane_pid: string; command: string } | null =>
   store === null ? null : guarded(() => runningLeadBlock(projectId), null);
 
 export const rexCannotTell = (name: string): string => `${name}: Rex could not be probed, so hive cannot tell where its block is`;
@@ -1350,6 +1438,63 @@ export function rexShowBlock(projectId: number, name: string, target: string, pl
   if (where !== "hidden") return `${name}: already shown`;
   rexUnfloat(target, lead.tmux_target, placement, windowLabel, leadServer(lead));
   return `${name}: shown`;
+}
+
+export interface RexFocus {
+  focused: boolean;
+  selected: boolean;
+  hint: string;
+}
+
+interface LabelledView {
+  label?: string | null;
+  windows?: { window_id?: string | null; label?: string | null; layers?: ViewLayer[] | null }[] | null;
+}
+
+interface ClientList {
+  clients?: { client_id?: string; connection_state?: string }[] | null;
+}
+
+export const REX_SELECT_TIMEOUT_MS = 5000;
+
+function selectSession(server: string, session: string, window: string): boolean {
+  let clients: string[];
+  try {
+    const listed = rexApi<ClientList>(server, "client.list", { kinds: ["app"] }).clients ?? [];
+    clients = listed.filter((c) => c.client_id && c.connection_state !== "lost").map((c) => c.client_id as string);
+  } catch {
+    return false;
+  }
+  let selected = false;
+  for (const client_id of clients) {
+    try {
+      const args = window ? { session_id: session, window_id: window } : { session_id: session };
+      rexApi(server, "client.perform", { client_id, action: "session.select", args, origin: "cli", timeout_ms: REX_SELECT_TIMEOUT_MS });
+      selected = true;
+    } catch {}
+  }
+  return selected;
+}
+
+export function rexFocus(target: string, server?: string): RexFocus {
+  const resolved = requireServer(target, server);
+  const session = rexSessionOf(resolved, target);
+  let focused = true;
+  try {
+    rexApi(resolved, "session.focus_block", { session_id: session, block_id: target });
+  } catch (err) {
+    if (!blockGone(err)) throw err;
+    focused = false;
+  }
+  let window = "";
+  let hint = `Rex session ${session}, tab (unknown)`;
+  try {
+    const view = rexApi<LabelledView>(resolved, "session.view", { session_id: session });
+    window = placeOf(view as SessionView, target)?.window ?? "";
+    const tab = (view.windows ?? []).find((w) => w.window_id === window)?.label ?? "";
+    hint = `Rex session ${view.label || session}, tab ${tab || window || "(unknown)"}`;
+  } catch {}
+  return { focused, selected: focused && selectSession(resolved, session, window), hint };
 }
 
 export function rexPeekBlock(projectId: number, name: string, target: string): string {
