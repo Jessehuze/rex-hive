@@ -3,6 +3,7 @@ import type { ProcessSnapshot } from "./dashboard.js";
 import { db } from "./db.js";
 import { loadProjectYml } from "./projectYml.js";
 import { closeAgentRow, currentOwnership, killAgentPane, paneIdentity, relayoutAfterPaneLeft } from "./spawn.js";
+import { rexStopProcess, rexVisibility, rowServer } from "./terminal/rex.js";
 import {
   sessionName,
   type RowOwnership,
@@ -13,7 +14,7 @@ import {
   cancelCopyMode,
   observeRowOwnership,
   paneProcessExited,
-  rowLive,
+  rowLive, isRexTarget,
 } from "./terminal.js";
 
 // One derivation for every surface that reports where a project's processes are: `hive status`,
@@ -34,7 +35,7 @@ export function snapshotProcesses(projectId: number): ProcessSnapshot[] {
 
       // A row recorded on a socket this process cannot see into reads as unknown, never as a
       // location: the pane id would name whatever holds it on THIS server.
-      visibility:
+      visibility: isRexTarget(r.tmux_target) ? rexVisibility(r.tmux_target, null, rowServer(r.tmux_socket, r.tmux_target) ?? undefined) :
         windows !== null && rowLive(r.tmux_socket, r.tmux_target) === true ? paneVisibility(r.tmux_target, windows) : null,
       startedAt: r.created_at,
     })),
@@ -197,6 +198,7 @@ export function stopProcess(row: StoppableRow, reason: StopReason): StoppedProce
   if (ownership !== "live") return notOwned(row, ownership);
 
   markStopping(row.project_id, row.id);
+  if (isRexTarget(row.tmux_target)) return stopRexProcess(row, identity);
   const window = paneWindow(row.tmux_target);
   const beforeSignal = currentOwnership(row.id, identity);
   if (beforeSignal !== "live") {
@@ -234,6 +236,26 @@ export function stopProcess(row: StoppableRow, reason: StopReason): StoppedProce
   clearStoppingMarker(row.project_id, row.id);
   relayoutAfterPaneLeft(window);
   return { name: row.name, leg };
+}
+
+const REX_UNREACHABLE_NOTE = "Rex could not be reached during the stop, so hive left it running";
+
+function stopRexProcess(row: StoppableRow, identity: ReturnType<typeof paneIdentity>): StoppedProcess {
+  const beforeSignal = currentOwnership(row.id, identity);
+  if (beforeSignal !== "live") {
+    clearStoppingMarker(row.project_id, row.id);
+    return notOwned(row, beforeSignal);
+  }
+  let stopped: { exited: boolean; gone: boolean };
+  try {
+    stopped = rexStopProcess(row.tmux_target, STOP_GRACE_MS, rowServer(row.tmux_socket, row.tmux_target) ?? undefined);
+  } catch {
+    return { name: row.name, leg: "unreachable", note: REX_UNREACHABLE_NOTE };
+  }
+  if (!stopped.gone) return { name: row.name, leg: "still-running" };
+  closeAgentRow(row.id, identity);
+  clearStoppingMarker(row.project_id, row.id);
+  return { name: row.name, leg: stopped.exited ? "interrupted" : "killed" };
 }
 
 export function stopAllProcesses(projectId: number, reason: StopReason): StoppedProcess[] {

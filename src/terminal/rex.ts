@@ -19,6 +19,7 @@ import {
   type Liveness,
   type RowOwnership,
   type RowPaneIdentity,
+  type WindowLayout,
 } from "../tmux.js";
 
 export const rexRefusal = (operation: string): string =>
@@ -35,9 +36,7 @@ const refuse = (operation: string): never => {
   throw new RexNotImplemented(operation);
 };
 
-export const startProcess = (): never => refuse("hive.yml processes");
 export const respawnLead = (): never => refuse("lead handoff");
-export const floatHidden = (): never => refuse("hidden workers");
 
 export interface RexStore {
   inTransaction?: boolean;
@@ -581,21 +580,92 @@ export function rexClose(target: string, server?: string): void {
   }
 }
 
-export function rexStop(target: string, timeoutMs: number, server?: string): void {
+const REX_STOP_POLL_MS = 100;
+
+function awaitExit(target: string, timeoutMs: number, server: string): boolean {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const probe = rexProbe(target, server);
+    if (probe.live === false || probe.exited) return true;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(REX_STOP_POLL_MS, remaining));
+  }
+}
+
+export function rexStopProcess(target: string, timeoutMs: number, server?: string): { exited: boolean; gone: boolean } {
   const resolved = requireServer(target, server);
   try {
     rexSendKey(target, "C-c", resolved);
   } catch (err) {
-    if (blockGone(err)) return;
+    if (blockGone(err)) return { exited: true, gone: true };
     throw err;
   }
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const probe = rexProbe(target, resolved);
-    if (probe.live === false || probe.exited || Date.now() >= deadline) break;
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
-  }
+  const exited = awaitExit(target, timeoutMs, resolved);
   rexClose(target, resolved);
+  return { exited, gone: rexProbe(target, resolved).live === false };
+}
+
+export const rexStop = (target: string, timeoutMs: number, server?: string): void => void rexStopProcess(target, timeoutMs, server);
+
+export function rexFinalScreen(target: string, lines: number, server?: string): string {
+  return rexCapture(target, Math.max(lines * 10, 200), false, server).split("\n").filter((row) => row.trim() !== "").slice(-lines).join("\n");
+}
+
+export const REX_REAP_MAX_FAILURES = 3;
+const REAP_PENDING_PREFIX = "terminal:rex:reap:";
+
+interface PendingReap {
+  agent: number;
+  target: string;
+  server: string;
+  failures: number;
+}
+
+function captureThenClose(pending: PendingReap, projectId: number, lines: number): void {
+  const key = `${REAP_PENDING_PREFIX}${pending.agent}`;
+  let screen: string;
+  try {
+    screen = rexFinalScreen(pending.target, lines, pending.server);
+  } catch {
+    const failures = pending.failures + 1;
+    if (failures <= REX_REAP_MAX_FAILURES) {
+      writeKv(projectId, key, JSON.stringify({ ...pending, failures }));
+      return;
+    }
+    screen = "";
+  }
+  if (screen && store !== null) sql().prepare("UPDATE agents SET exit_tail = ? WHERE id = ? AND exit_tail = ''").run(screen, pending.agent);
+  rexClose(pending.target, pending.server);
+  if (store !== null) sql().prepare("DELETE FROM kv WHERE project_id = ? AND key = ?").run(projectId, key);
+}
+
+export function rexReapExited(
+  row: { id: number; project_id: number }, target: string, server: string | null, snap: RexSnapshot | null | undefined, lines = 30,
+): void {
+  try {
+    if (!server) return;
+    const seen = snap && snap.answered && snap.server === server ? snap.blocks.get(target) : undefined;
+    const exited = seen ? seen.probed && seen.exited : rexProbe(target, server).exited;
+    if (!exited) return;
+    captureThenClose({ agent: row.id, target, server, failures: 0 }, row.project_id, lines);
+  } catch {}
+}
+
+export function rexReapPending(snap: RexSnapshot | null | undefined, lines = 30): void {
+  if (store === null) return;
+  const rows = guarded(
+    () => sql().prepare("SELECT project_id, value FROM kv WHERE key LIKE ?").all(`${REAP_PENDING_PREFIX}%`) as { project_id: number; value: string }[],
+    [],
+  );
+  for (const row of rows) {
+    try {
+      const pending = JSON.parse(row.value) as PendingReap;
+      const gone = snap?.answered === true && snap.server === pending.server && !snap.incomplete && !snap.blocks.has(pending.target);
+      if (gone) sql().prepare("DELETE FROM kv WHERE project_id = ? AND key = ?").run(row.project_id, `${REAP_PENDING_PREFIX}${pending.agent}`);
+      else captureThenClose(pending, row.project_id, lines);
+    } catch {}
+  }
 }
 
 export const REX_SHELL_FLAVOR = "com.superlogical.terminal.shell";
@@ -806,7 +876,6 @@ interface CreatedReply {
 }
 
 export function rexCreatePane(spec: RexPaneSpec): RexPlaced {
-  if (spec.placement === "hidden") floatHidden();
   if (store !== null && store.inTransaction === false) {
     throw new Error("rexCreatePane must run inside withWindowClaim, so two hive processes cannot create the same project's tab");
   }
@@ -840,7 +909,7 @@ export function rexCreatePane(spec: RexPaneSpec): RexPlaced {
     },
   };
   let reply: CreatedReply;
-  if (spec.placement === "split") {
+  if (spec.placement === "split" || spec.placement === "hidden") {
     reply = rexApi<CreatedReply>(server, "session.new_split", {
       session_id: session, anchor_id: spec.beside, direction: "horizontal", side: "after", layout, focus: false,
     });
@@ -861,6 +930,14 @@ export function rexCreatePane(spec: RexPaneSpec): RexPlaced {
   writeKv(spec.projectId, REX_IN_USE_KEY, "1");
   const probe = rexProbe(target, server);
   if (probe.exited) quickExit(target, server);
+  if (spec.placement === "hidden") {
+    try {
+      rexFloatHidden(target, spec.beside!, server);
+    } catch (err) {
+      bestEffort(() => rexClose(target, server));
+      throw err;
+    }
+  }
   return { target, socket: rexSocketOf(server), pid: probe.pid ?? "", window };
 }
 
@@ -889,4 +966,279 @@ export function rexRefuseQuickExit(target: string, server?: string, windowMs = R
     if (Date.now() >= deadline) return;
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
   }
+}
+
+type Rect = [number, number, number, number];
+
+interface ViewNode {
+  rect?: number[] | null;
+  block_id?: string | null;
+  split?: { before?: ViewNode | null; after?: ViewNode | null } | null;
+}
+
+interface ViewLayer {
+  layer_id?: string | null;
+  kind?: string;
+  state?: string;
+  layout?: ViewNode | null;
+  blocks?: { block_id?: string | null }[] | null;
+}
+
+interface SessionView {
+  windows?: { window_id?: string | null; layers?: ViewLayer[] | null }[] | null;
+}
+
+interface BlockPlace {
+  window: string;
+  layer: string;
+  floating: boolean;
+  minimized: boolean;
+  rect: Rect | null;
+}
+
+const WHOLE_WINDOW: Rect = [0, 0, 1, 1];
+
+function rectIn(node: ViewNode | null | undefined, block: string): Rect | null {
+  if (!node) return null;
+  if (node.block_id === block) return Array.isArray(node.rect) && node.rect.length === 4 ? (node.rect as Rect) : null;
+  return rectIn(node.split?.before, block) ?? rectIn(node.split?.after, block);
+}
+
+function placeOf(view: SessionView, block: string): BlockPlace | null {
+  for (const window of view.windows ?? []) {
+    for (const layer of window.layers ?? []) {
+      if (!(layer.blocks ?? []).some((b) => b.block_id === block)) continue;
+      return {
+        window: window.window_id ?? "",
+        layer: layer.layer_id ?? "",
+        floating: layer.kind !== "tiled",
+        minimized: layer.state === "minimized",
+        rect: rectIn(layer.layout, block),
+      };
+    }
+  }
+  return null;
+}
+
+const fits = (rect: Rect | null): Rect => {
+  if (!rect || rect.some((n) => !Number.isFinite(n)) || rect[2] <= 0 || rect[3] <= 0) return WHOLE_WINDOW;
+  const x = Math.min(Math.max(rect[0], 0), 1);
+  const y = Math.min(Math.max(rect[1], 0), 1);
+  const w = Math.min(rect[2], 1 - x);
+  const h = Math.min(rect[3], 1 - y);
+  return w > 0 && h > 0 ? [x, y, w, h] : WHOLE_WINDOW;
+};
+
+const sessionView = (server: string, session: string): SessionView => rexApi<SessionView>(server, "session.view", { session_id: session });
+
+function placed(view: SessionView, block: string): BlockPlace {
+  const where = placeOf(view, block);
+  if (!where) throw new RexError(`block ${block} is not in a tab of the lead's session`, "not_found", "");
+  return where;
+}
+
+export function rexFloatHidden(target: string, leadTarget: string, server?: string): void {
+  const resolved = requireServer(leadTarget, server);
+  const session = rexSessionOf(resolved, leadTarget);
+  let view = sessionView(resolved, session);
+  const lead = placed(view, leadTarget);
+  let mine = placed(view, target);
+  if (mine.window !== lead.window) {
+    rexApi(resolved, "session.move_block", { session_id: session, block_id: target, anchor_block_id: leadTarget, side: "after" });
+    view = sessionView(resolved, session);
+    mine = placed(view, target);
+  }
+  let layer = mine.layer;
+  if (!mine.floating) {
+    layer = rexApi<{ layer_id?: string | null }>(resolved, "session.float_block", {
+      session_id: session, block_id: target, bounds: fits(placed(view, leadTarget).rect),
+    }).layer_id ?? "";
+    if (!layer) throw new RexError(`rex floated ${target} but named no layer`, "bad_output", "");
+  }
+  if (!mine.floating || !mine.minimized) {
+    rexApi(resolved, "session.set_layer_state", { session_id: session, layer_id: layer, state: "minimized" });
+  }
+  const sized = fits(placed(sessionView(resolved, session), leadTarget).rect);
+  rexApi(resolved, "session.resize_layer", { session_id: session, layer_id: layer, bounds: sized });
+}
+
+export const REX_PLACEHOLDER_ARGV = ["/bin/sleep", "600"];
+
+export function rexUnfloat(target: string, leadTarget: string, placement: "split" | "window", windowLabel?: string, server?: string): void {
+  const resolved = requireServer(leadTarget, server);
+  const session = rexSessionOf(resolved, leadTarget);
+  placed(sessionView(resolved, session), target);
+  if (placement === "split") {
+    rexApi(resolved, "session.move_block", { session_id: session, block_id: target, anchor_block_id: leadTarget, direction: "horizontal", side: "after" });
+    return;
+  }
+  const made = rexApi<CreatedReply>(resolved, "session.new_window", {
+    session_id: session,
+    ...(windowLabel ? { window_label: windowLabel } : {}),
+    layout: {
+      block: {
+        flavor: REX_SHELL_FLAVOR,
+        label: "hive placeholder",
+        options: { shell: "none", login: false, command: REX_PLACEHOLDER_ARGV, exit: { on_completion: true } },
+      },
+    },
+    focus: false,
+  });
+  const placeholder = made.block_ids?.[0];
+  if (!placeholder) throw new RexError("rex created no placeholder block for the new tab", "bad_output", "");
+  try {
+    rexApi(resolved, "session.move_block", { session_id: session, block_id: target, anchor_block_id: placeholder, side: "after" });
+  } finally {
+    rexClose(placeholder, resolved);
+  }
+}
+
+export type RexVisibility = "shown" | "hidden" | "window";
+
+export function rexVisibility(target: string, leadTarget: string | null, server?: string): RexVisibility | null {
+  try {
+    const resolved = requireServer(target, server);
+    const view = sessionView(resolved, rexSessionOf(resolved, target));
+    const mine = placeOf(view, target);
+    if (!mine) return null;
+    if (mine.floating) return "hidden";
+    const lead = leadTarget ? placeOf(view, leadTarget) : null;
+    return lead && lead.window !== mine.window ? "window" : "shown";
+  } catch {
+    return null;
+  }
+}
+
+type Direction = "horizontal" | "vertical";
+
+export interface RexLayoutPlan {
+  moves: { block: string; anchor: string; direction: Direction }[];
+  resizes: { before: string; after: string; direction: Direction; ratio: number }[];
+}
+
+function chain(panes: string[], direction: Direction, plan: RexLayoutPlan): void {
+  for (let i = 1; i < panes.length; i++) plan.moves.push({ block: panes[i], anchor: panes[i - 1], direction });
+  for (let i = 0; i + 1 < panes.length; i++) {
+    plan.resizes.push({ before: panes[i], after: panes[i + 1], direction, ratio: 1 / (panes.length - i) });
+  }
+}
+
+export function rexLayoutPlan(lead: string, blocks: string[], layout: WindowLayout): RexLayoutPlan {
+  const plan: RexLayoutPlan = { moves: [], resizes: [] };
+  const panes = [lead, ...blocks];
+  if (blocks.length === 0) return plan;
+  if (layout === "even-horizontal" || layout === "even-vertical") {
+    chain(panes, layout === "even-horizontal" ? "horizontal" : "vertical", plan);
+  } else if (layout === "main-vertical" || layout === "main-horizontal") {
+    const main: Direction = layout === "main-vertical" ? "horizontal" : "vertical";
+    plan.moves.push({ block: blocks[0], anchor: lead, direction: main });
+    plan.resizes.push({ before: lead, after: blocks[0], direction: main, ratio: 0.5 });
+    chain(blocks, main === "horizontal" ? "vertical" : "horizontal", plan);
+  } else {
+    const columns = Math.ceil(Math.sqrt(panes.length));
+    const rows: string[][] = [];
+    for (let i = 0; i < panes.length; i += columns) rows.push(panes.slice(i, i + columns));
+    const heads = rows.map((row) => row[0]);
+    const columnPlan: RexLayoutPlan = { moves: [], resizes: [] };
+    chain(heads, "vertical", columnPlan);
+    plan.moves.push(...columnPlan.moves);
+    for (const row of rows) chain(row, "horizontal", plan);
+    plan.resizes.unshift(...columnPlan.resizes);
+  }
+  return plan;
+}
+
+export function rexApplyLayout(window: { lead: string; blocks: string[]; server?: string }, layout: WindowLayout): RexLayoutPlan {
+  const resolved = requireServer(window.lead, window.server);
+  const session = rexSessionOf(resolved, window.lead);
+  const plan = rexLayoutPlan(window.lead, window.blocks, layout);
+  for (const move of plan.moves) {
+    rexApi(resolved, "session.move_block", {
+      session_id: session, block_id: move.block, anchor_block_id: move.anchor, direction: move.direction, side: "after",
+    });
+  }
+  for (const resize of plan.resizes) {
+    rexApi(resolved, "session.resize_pane", {
+      session_id: session, direction: resize.direction, before_block_id: resize.before, after_block_id: resize.after, ratio: resize.ratio,
+    });
+  }
+  return plan;
+}
+
+interface ProjectBlockRow {
+  name: string;
+  kind: string;
+  tmux_target: string;
+  tmux_socket: string;
+  pane_pid: string;
+  command: string;
+}
+
+function runningLeadBlock(projectId: number): ProjectBlockRow | null {
+  return (
+    (sql()
+      .prepare(
+        `SELECT name, kind, tmux_target, tmux_socket, pane_pid, command FROM agents
+          WHERE project_id = ? AND kind = 'lead' AND status = 'running' AND tmux_target LIKE 'block:%' ORDER BY id DESC LIMIT 1`,
+      )
+      .get(projectId) as ProjectBlockRow | undefined) ?? null
+  );
+}
+
+export function rexLayoutProject(projectId: number, layout: WindowLayout): { lines: string[]; exitCode: number } {
+  const lead = runningLeadBlock(projectId);
+  if (!lead || rexOwnership(lead) !== "live") return { lines: ["the lead block could not be verified; nothing was changed"], exitCode: 1 };
+  const server = rowServer(lead.tmux_socket, lead.tmux_target);
+  if (!server) return { lines: ["Rex could not be reached; nothing was changed"], exitCode: 1 };
+  const rows = sql()
+    .prepare(
+      `SELECT name, kind, tmux_target, tmux_socket, pane_pid, command FROM agents
+        WHERE project_id = ? AND kind != 'lead' AND status = 'running' AND tmux_target LIKE 'block:%' AND tmux_socket = ? ORDER BY id`,
+    )
+    .all(projectId, lead.tmux_socket) as ProjectBlockRow[];
+  const snap = rexSnapshot(server, rows.map((r) => r.tmux_target));
+  if (snap === null || !snap.answered) return { lines: ["Rex could not be reached; nothing was changed"], exitCode: 1 };
+  const view = sessionView(server, rexSessionOf(server, lead.tmux_target));
+  const visible = rows.filter((r) => rexOwnership(r, snap) === "live" && placeOf(view, r.tmux_target)?.floating === false);
+  if (visible.length === 0) return { lines: ["nothing to arrange"], exitCode: 0 };
+  rexApplyLayout({ lead: lead.tmux_target, blocks: visible.map((r) => r.tmux_target), server }, layout);
+  return {
+    lines: [`arranged the lead and ${visible.length} block${visible.length === 1 ? "" : "s"} (${visible.map((r) => r.name).join(", ")}); layout ${layout}`],
+    exitCode: 0,
+  };
+}
+
+export const rexProjectLead = (projectId: number): { tmux_target: string; tmux_socket: string } | null =>
+  store === null ? null : guarded(() => runningLeadBlock(projectId), null);
+
+export const rexCannotTell = (name: string): string => `${name}: Rex could not be probed, so hive cannot tell where its block is`;
+
+function rexMinimized(target: string, server?: string): boolean | null {
+  try {
+    const resolved = requireServer(target, server);
+    const mine = placeOf(sessionView(resolved, rexSessionOf(resolved, target)), target);
+    return mine ? mine.floating && mine.minimized : null;
+  } catch {
+    return null;
+  }
+}
+
+export function rexHideProcess(projectId: number, name: string, target: string): string {
+  const lead = runningLeadBlock(projectId);
+  if (!lead) return `${name}: this project has no lead block to float it beside; run hive first`;
+  const minimized = rexMinimized(target, rowServer(lead.tmux_socket, lead.tmux_target) ?? undefined);
+  if (minimized === null) return rexCannotTell(name);
+  if (minimized) return `${name}: already hidden`;
+  rexFloatHidden(target, lead.tmux_target, rowServer(lead.tmux_socket, lead.tmux_target) ?? undefined);
+  return `${name}: hidden`;
+}
+
+export function rexShowProcess(projectId: number, name: string, target: string, placement: "split" | "window", windowLabel: string): string {
+  const lead = runningLeadBlock(projectId);
+  if (!lead) return `${name}: this project has no lead block to show it beside; run hive first`;
+  const where = rexVisibility(target, lead.tmux_target, rowServer(lead.tmux_socket, lead.tmux_target) ?? undefined);
+  if (where === null) return rexCannotTell(name);
+  if (where !== "hidden") return `${name}: already shown`;
+  rexUnfloat(target, lead.tmux_target, placement, windowLabel, rowServer(lead.tmux_socket, lead.tmux_target) ?? undefined);
+  return `${name}: shown`;
 }

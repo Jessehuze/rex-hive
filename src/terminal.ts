@@ -7,6 +7,8 @@ import {
   rexClose,
   rexOwnership,
   rexProbe,
+  rexReapExited,
+  rexReapPending,
   rexRowProbe,
   rexSendKey,
   rexSendKeys,
@@ -278,6 +280,15 @@ export function observeRowOwnership(row: RowPaneIdentity): RowOwnership | "probe
 
 const rexServerFor = (socket: string, target: string): string | null =>
   isRexSocket(socket) ? rexServerOf(socket) : serverForTarget(target);
+
+export function reapExitedBlock(row: { id: number; project_id: number; tmux_target: string; tmux_socket: string }, snapshot: AliveSnapshot | null): void {
+  if (!rexRow(row.tmux_socket, row.tmux_target) || !row.tmux_target) return;
+  rexReapExited(row, row.tmux_target, rexServerFor(row.tmux_socket, row.tmux_target), rexOf(snapshot));
+}
+
+export function reapPendingBlocks(snapshot: AliveSnapshot | null): void {
+  if (rexActive()) rexReapPending(rexOf(snapshot));
+}
 
 export function targetLiveProbe(target: string): PaneProbe {
   return isRexTarget(target) ? rexRowProbe("", target) : tmuxTargetLiveProbe(target);

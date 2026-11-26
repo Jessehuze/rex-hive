@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { basename, dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 
-import { clearHiveEnv, isolateTmux, seedTrustedYml, leadRow, makeFakeClaude, McpClient, runCli, scratchDirs } from "./helpers.mjs";
+import { clearHiveEnv, isolateTmux, leadRow, makeFakeClaude, McpClient, runCli, scratchDirs } from "./helpers.mjs";
 import { fakeRexDo, isolateRex, waitFor } from "./rex-helpers.mjs";
 
 const { hasTmux, cleanup: cleanupTmux } = isolateTmux("rex spawn tests");
@@ -202,14 +202,9 @@ describe("Rex leads", () => {
     assert.equal(fake.state().windows.find((w) => w.window_id === block.window_id).label, "queen");
   });
 
-  it("hive.yml processes and lead-handoff under a Rex lead refuse by name and start nothing", async () => {
+  it("lead-handoff under a Rex lead refuses by name", async () => {
     const dir = freshProject("rex-refusals");
     const { project } = await startLead(dir);
-    await seedTrustedYml({ db, projectId: project.id, projectDir: dir, processes: { web: "sleep 600" } });
-    const blocks = Object.keys(fake.state().blocks).length;
-    const started = await runCli(["start", "web"], { cwd: dir, dataDir: dirs.dataDir, tmp: dirs.tmp, env: withClaude() });
-    assert.match(started.stdout + started.stderr, /hive\.yml processes is not available under the Rex terminal/);
-    assert.equal(Object.keys(fake.state().blocks).length, blocks);
     const lead = leadRow(db, project.id);
     const handoff = await runCli(["lead-handoff", "--pad", "1", "--revision", "1"], {
       cwd: dir,
