@@ -611,6 +611,8 @@ const SCHEMAS = {
   "session.resize_pane": { keys: ["after_block_id", "before_block_id", "direction", "ratio", "session_id"], required: ["session_id", "direction", "before_block_id", "after_block_id", "ratio"] },
   "session.view": { keys: ["session_id"], required: ["session_id"] },
   "session.focus_block": { keys: ["block_id", "session_id"], required: ["session_id", "block_id"] },
+  "client.list": { keys: ["kinds", "session_id"], required: [] },
+  "client.perform": { keys: ["action", "args", "block_id", "client_id", "origin", "session_id", "timeout_ms"], required: ["client_id", "action"] },
 };
 
 const checkRatio = (ratio) => {
@@ -811,9 +813,16 @@ function apiCall(state, method, params) {
     case "block.method":
       if (!params.block_id) fail("bad_request", "block_id is required");
       return blockMethod(state, params, String(params.method ?? "").replace(`${TERMINAL}.`, ""), params.args ?? {});
-    case "client.perform":
-      state.performed.push({ client_id: params.client_id, action: params.action, args: params.args ?? null });
-      return { performed_by: params.client_id ?? "client:fake", result: null };
+    case "client.list": {
+      const clients = (state.clients ?? []).filter((c) => !params.kinds?.length || params.kinds.includes(c.info?.kind));
+      return { clients: clients.filter((c) => !params.session_id || (c.session_ids ?? []).includes(params.session_id)) };
+    }
+    case "client.perform": {
+      if (!(state.clients ?? []).some((c) => c.client_id === params.client_id)) fail("not_found", `no client ${params.client_id} is connected`);
+      if (state.perform_error) fail(state.perform_error, `client ${params.client_id} did not perform ${params.action}`);
+      state.performed.push({ client_id: params.client_id, action: params.action, args: params.args ?? null, session_id: params.session_id ?? null });
+      return { performed_by: params.client_id };
+    }
     default:
       fail("method_not_found", `the fake does not implement ${method}`);
   }
@@ -919,6 +928,10 @@ function fakeOp(op, raw) {
         return {};
       case "setProgramStatus":
         state.blocks[args.block_id].program_status = args.records ?? [];
+        return {};
+      case "setClients":
+        state.clients = args.clients ?? [];
+        state.perform_error = args.perform_error ?? null;
         return {};
       case "setPorts":
         state.blocks[args.block_id].ports = args.ports ?? [];
