@@ -195,8 +195,8 @@ import {
   resolveAttachTarget,
   resolveInTmuxTarget,
   rowLive,
-  resolveTerminal,
-  rowOwnership, terminalOfRow, isRexTarget, rexServerOf,
+  resolveTerminal, rexActive,
+  rowOwnership, terminalOfRow, isRexTarget, rexServerOf, rowSubagents,
   serverEnvironment,
   sessionClients,
   setPaneTitle,
@@ -215,7 +215,7 @@ import { markWorkerLost } from "./workerRecovery.js";
 import { rexCallerBlock } from "./rexCli.js";
 import { REX_RESUME_PID_ENV, REX_RESUME_RULE_NAME, REX_RESUME_VERB, rexLaunchReport, rexResumeLine, rexResumeTrustRule } from "./rexResume.js";
 import type { AgentRow } from "./agentRecords.js";
-import { describeProcess, formatLocal, processCounts } from "./dashboard.js";
+import { describeProcess, formatLocal, processCounts, subagentsLabel } from "./dashboard.js";
 import {
   awaitStartedPorts,
   runningCommandRow,
@@ -300,7 +300,7 @@ import {
 } from "./pads.js";
 import { answerQuestion, listQuestions } from "./questions.js";
 
-function usage(): never {
+function usage(): never { const rex = rexActive();
   console.log(`hive — run a crew of Claude Code and Codex workers from one lead session
 
 Usage:
@@ -323,11 +323,11 @@ Usage:
   hive stop <process> [path]  stop one running process; --all stops every one
   hive show <process> [path]  move a running process's pane beside the lead
   hive hide <process> [path]  move it back into the <project>/processes window
-  hive show|hide <worker> [path] | --all [path]
+${rex ? `  hive show|hide <worker> [path] | --all [path]
                              Rex only: hide floats a worker minimized in the
                              lead's tab; show moves it back; --all covers every
                              running worker and no process
-  hive peek <worker> [path]  Rex only: restore a hidden worker over the lead and
+` : ""}  hive peek <worker> [path]  Rex only: restore a hidden worker over the lead and
                              focus it; hive hide minimizes it again
   hive layout               gather this project's live workers and restore its configured layout
   hive crew-restore [--dry-run] [--json]
@@ -348,12 +348,12 @@ Usage:
   hive setup [--dir <dir>]   write a \`hive\` that runs the interpreter this build
                              was compiled for; re-run after every update
   hive setup --attach <mode> auto|raw|control: whether tmux attaches carry -CC
-  hive setup --terminal <t>  tmux|rex: the terminal a new lead starts in;
+${rex ? `  hive setup --terminal <t>  tmux|rex: the terminal a new lead starts in;
                              HIVE_TERMINAL and a project's hive.yml win over it
   hive setup --rex-resume    print the Rex init.lua trust rule that lets Rex
                              resume hive leads and workers after a restart;
                              writes nothing to Rex's config
-  hive doctor [--strict] [--verbose]
+` : ""}  hive doctor [--strict] [--verbose]
                              check the environment and clean up stale state;
                              --strict also exits non-zero on warnings that mean
                              this install is wrong (dispatcher, registration, ABI);
@@ -389,7 +389,7 @@ Usage:
 hive lead reads hive.yml from the project root when present; hive init
 writes this starter file (uncomment what you need):
 
-${HIVE_YML_TEMPLATE.trimEnd().replace(/^/gm, "  ")}
+${hiveYmlTemplate(rex).trimEnd().replace(/^/gm, "  ")}
 
 Repo-defined commands run only after a one-time interactive approval; any
 change to a command re-requires it. By default (attach mode auto), lead/attach
@@ -1230,7 +1230,7 @@ async function cmdQueen(argv: string[]): Promise<void> {
   await cmdLead([home, ...parsed.flags]);
 }
 
-const HIVE_YML_TEMPLATE = `# hive project config. Read by \`hive lead\` from the project root.
+const hiveYmlTemplate = (rex: boolean): string => `# hive project config. Read by \`hive lead\` from the project root.
 # Commands defined here run only after a one-time interactive approval,
 # and re-require it whenever they change.
 
@@ -1288,8 +1288,8 @@ const HIVE_YML_TEMPLATE = `# hive project config. Read by \`hive lead\` from the
 #     command: npx tsc --watch --preserveWatchOutput
 #     dir: ./packages/api       # relative to the project root
 #     auto_start: false         # start manually with: hive start typecheck
-#     wait_for_port: 3000       # hive start waits for this port; true waits for any
-#     visible: false            # tile it in one <project>/processes window instead of
+${rex ? `#     wait_for_port: 3000       # hive start waits for this port; true waits for any
+` : ""}#     visible: false            # tile it in one <project>/processes window instead of
 #                               # following placement: above; hive show/hide move it (default true)
 #     env:
 #       NODE_ENV: development
@@ -1516,7 +1516,7 @@ async function cmdInit(argv: string[]): Promise<void> {
   }
 
   if (!ymlExists) {
-    writeFileSync(ymlPath, HIVE_YML_TEMPLATE + (chosen && !inheritedProfile ? `\nprofile: ${chosen}\n` : ""));
+    writeFileSync(ymlPath, hiveYmlTemplate(rexActive()) + (chosen && !inheritedProfile ? `\nprofile: ${chosen}\n` : ""));
     console.log(`- hive.yml: created${chosen ? ` with profile: ${chosen}` : ""}`);
   } else if (already == null && chosen != null && !inheritedProfile) {
     writeProfileKey(ymlPath, chosen);
@@ -2033,7 +2033,7 @@ function visibilityProject(parsed: ParsedArgs, verb: VisibilityVerb, pathAt: num
 function resolveVisibilityTarget(parsed: ParsedArgs, verb: VisibilityVerb): VisibilityHit | null {
   const name = parsed.positional[0];
   if (!name) {
-    console.log(verb === "peek" ? "Usage: hive peek <worker> [path]" : `Usage: hive ${verb} <process|worker> [path] | hive ${verb} --all [path]`);
+    console.log(verb === "peek" ? "Usage: hive peek <worker> [path]" : rexActive() ? `Usage: hive ${verb} <process|worker> [path] | hive ${verb} --all [path]` : `Usage: hive ${verb} <process> [path]`);
     process.exit(1);
   }
   const { project, config } = visibilityProject(parsed, verb, 1);
@@ -2536,7 +2536,8 @@ function cmdStatus(): void {
 
       const label = a.kind === "command" ? "cmd  " : a.kind === LEAD_KIND ? "lead " : "agent";
       console.log(`  ${label}  ${a.name.padEnd(20)} ${state}`);
-
+      const subagents = a.kind === "command" || !isRexTarget(a.tmux_target) ? null : subagentsLabel(rowSubagents(a, statusSnapshot()));
+      if (subagents) console.log(`         ${subagents}`);
       if (reportsAgentStateLog(a)) {
         console.log(`         last log event: ${describeLastLogEvent(lastLogEvent(a.actor_id))}`);
       }
@@ -2643,7 +2644,7 @@ function cmdUpgrade(argv: string[]): void {
 
 function cmdSetup(argv: string[]): void {
   const parsed = parseArgs(argv, { flags: ["--force", "--rex-resume"], valued: ["--dir", "--attach", "--auto-attach", "--terminal"] });
-  rejectUnknownFlags("setup", parsed, "--dir, --attach, --auto-attach, --force. Also --terminal tmux|rex and --rex-resume");
+  rejectUnknownFlags("setup", parsed, rexActive() ? "--dir, --attach, --auto-attach, --force. Also --terminal tmux|rex and --rex-resume" : "--dir, --attach, --auto-attach, --force");
   requireFlagValues("setup", parsed);
   if (parsed.flags.has("--rex-resume")) return printRexResumeRule();
 
@@ -2735,7 +2736,7 @@ function cmdSetup(argv: string[]): void {
   console.log(`\nattach mode  ${attachMode()}`);
   console.log(`auto-attach  ${resolvedAutoAttach().value}`);
   const terminal = resolveTerminalAndWarn(null);
-  console.log(`terminal     ${terminal.terminal} (source: ${terminal.source})`);
+  if (terminal.source !== "default" || rexActive()) console.log(`terminal     ${terminal.terminal} (source: ${terminal.source})`);
   if (attachArg === "raw") {
     console.log("\nRecommended ~/.tmux.conf setting for raw attach mode:");
     for (const line of RAW_ATTACH_TMUX_CONFIG) console.log(`  ${line}`);
@@ -3318,9 +3319,9 @@ function reportEffectiveConfig(loaded: ResolvedHiveConfig): void {
       const terminalWarnings: string[] = [];
       const resolved = resolveTerminal(config, terminalWarnings);
       for (const w of terminalWarnings) warn("config terminal", w);
-      info("config terminal", `${JSON.stringify(resolved.terminal)} (source: ${resolved.source})`);
+      if (resolved.source !== "default" || rexActive()) info("config terminal", `${JSON.stringify(resolved.terminal)} (source: ${resolved.source})`);
       continue;
-    }
+    } else if (key === "workers" && config.workers === null && !rexActive()) continue;
     info(`config ${key}`, `${JSON.stringify(config[key])} (source: ${loaded.sources[key] ?? "built-in"})`);
   }
   const varKeys = new Set(Object.keys(config.vars));

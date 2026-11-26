@@ -101,9 +101,9 @@ import {
   observeRowOwnership,
   paneCurrentCommand,
   paneInCopyMode,
-  pollPaneReadiness,
+  pollPaneReadiness, programStatusBlocks, rowSubagents,
   rowLive,
-  rowOwnership, sendText,
+  rowOwnership, rowSnapshot, sendText,
   setRemainOnExit,
 } from "../terminal.js";
 import { agentIdParam, agentNameParam, idParam, projectIdParam } from "./params.js";
@@ -1594,6 +1594,7 @@ export function registerAgents(server: McpServer): void {
             const summary = agentSummary(r, snapshot);
             return {
               ...summary,
+              subagents: rowSubagents(r, snapshot),
               ...(summary.alive !== true ? claudeOnlyFields(r) : {}),
 
               ...paneField(r, summary.alive),
@@ -1633,6 +1634,7 @@ export function registerAgents(server: McpServer): void {
         const briefPath = agentBriefPath(agent.id);
         return {
           ...summary,
+          subagents: rowSubagents(agent, snapshot),
 
           ...(summary.alive === null ? { note: unknownOwnershipNote(snapshot) } : {}),
           closed_at: agent.closed_at,
@@ -1784,15 +1786,16 @@ export function registerAgents(server: McpServer): void {
           const sendClassifier = harnessFor(agent.command).paneClassifier!;
           const submitting = args.submit !== false;
           const { awaitingChoice, tail } = sendClassifier.choiceCheck(target);
+          const statusBlocks = programStatusBlocks(target, rowSnapshot(agent));
           // Unreadable refuses only when an Enter follows: with submit=false there is no keypress
           // for a dialog to eat, the same reasoning that exempts submit=false from the box check.
-          if (awaitingChoice === true || (submitting && awaitingChoice === null)) {
+          if (awaitingChoice === true || statusBlocks || (submitting && awaitingChoice === null)) {
             return {
               agent_id: agent.id,
               name: agent.name,
               sent: false,
               note:
-                awaitingChoice === true
+                awaitingChoice === true || statusBlocks
                   ? "The pane is waiting on a choice (e.g. a permission or trust prompt), so text was NOT sent: typing here would answer the prompt instead of reaching the worker. Use keys to answer or dismiss it deliberately (e.g. [\"Escape\"], or the option's number plus Enter), then retry."
                   : "The pane could not be read, so text was NOT sent: hive cannot tell whether a dialog is on " +
                     "screen, and typing into one answers it instead of reaching the worker. This is usually a " +

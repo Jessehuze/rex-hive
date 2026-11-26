@@ -23,20 +23,6 @@ import {
   type WindowLayout,
 } from "../tmux.js";
 
-export const rexRefusal = (operation: string): string =>
-  `${operation} is not available under the Rex terminal in this build; restart the lead with HIVE_TERMINAL=tmux to use it`;
-
-export class RexNotImplemented extends Error {
-  constructor(readonly operation: string) {
-    super(rexRefusal(operation));
-    this.name = "RexNotImplemented";
-  }
-}
-
-const refuse = (operation: string): never => {
-  throw new RexNotImplemented(operation);
-};
-
 
 export interface RexStore {
   inTransaction?: boolean;
@@ -73,13 +59,21 @@ export interface ProgramStatus {
   msg: string | null;
 }
 
+export interface RexSubagents {
+  count: number;
+  titles: string[];
+}
+
+export const SUBAGENT_TITLES_MAX = 5;
+export const SUBAGENT_TITLE_MAX_CHARS = 80;
+
 export interface RexBlock {
   pid: string;
   argv: string;
   programs: string[];
   exited: boolean;
   status: ProgramStatus | null;
-  subagents: number;
+  subagents: RexSubagents | null;
   window: string;
   session: string;
   label: string;
@@ -313,6 +307,7 @@ interface StatusRecord {
   state?: string;
   kind?: string;
   msg?: string;
+  title?: string;
 }
 
 const programName = (value: string | undefined): string | null => (value ? basename(value.replace(/^-/, "")) : null);
@@ -335,12 +330,26 @@ function readProcess(reply: ProcessReply | null | undefined) {
   };
 }
 
+const isChild = (r: StatusRecord): boolean => r.id !== undefined && r.id !== null && r.id !== "";
+
+const plainText = (value: string): string => value.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").trim();
+
+function subagentTitle(r: StatusRecord): string {
+  const title = typeof r.title === "string" ? plainText(r.title) : "";
+  const points = Array.from(title !== "" ? title : plainText(String(r.id)));
+  return points.length > SUBAGENT_TITLE_MAX_CHARS ? `${points.slice(0, SUBAGENT_TITLE_MAX_CHARS - 1).join("")}…` : points.join("");
+}
+
+const recordsRead = (records: unknown): boolean =>
+  Array.isArray(records) || (records !== null && typeof records === "object" && Object.keys(records).length === 0);
+
 function readStatus(reply: { records?: StatusRecord[] | Record<string, never> } | null | undefined) {
   const records = Array.isArray(reply?.records) ? reply.records : [];
-  const root = records.find((r) => r.id === undefined || r.id === "") ?? null;
+  const root = records.find((r) => !isChild(r)) ?? null;
+  const children = records.filter(isChild);
   return {
     status: root ? { state: root.state ?? "idle", kind: root.kind ?? null, msg: root.msg ?? null } : null,
-    subagents: records.filter((r) => r.id !== undefined && r.id !== "").length,
+    subagents: recordsRead(reply?.records) ? { count: children.length, titles: children.slice(0, SUBAGENT_TITLES_MAX).map(subagentTitle) } : null,
   };
 }
 
@@ -612,7 +621,6 @@ export function rexStopProcess(target: string, timeoutMs: number, server?: strin
   return { exited, gone: rexProbe(target, resolved).live === false };
 }
 
-export const rexStop = (target: string, timeoutMs: number, server?: string): void => void rexStopProcess(target, timeoutMs, server);
 
 export function rexFinalScreen(target: string, lines: number, server?: string): string {
   return rexCapture(target, Math.max(lines * 10, 200), false, server).split("\n").filter((row) => row.trim() !== "").slice(-lines).join("\n");
@@ -676,6 +684,20 @@ export function rexReapPending(snap: RexSnapshot | null | undefined, lines = 30)
 
 export const REX_SHELL_FLAVOR = "com.superlogical.terminal.shell";
 export const REX_IN_USE_KEY = "terminal:rex:in-use";
+
+export function rexReleaseInUse(): void {
+  if (store === null) return;
+  bestEffort(() =>
+    sql()
+      .prepare(
+        `DELETE FROM kv WHERE key = ? AND updated_at < datetime('now', '-10 minutes')
+           AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.project_id = kv.project_id AND a.status = 'running'
+                             AND (a.tmux_target LIKE 'block:%' OR a.tmux_socket LIKE ?))
+           AND NOT EXISTS (SELECT 1 FROM kv r WHERE r.project_id = kv.project_id AND r.key LIKE ?)`,
+      )
+      .run(REX_IN_USE_KEY, `${REX_SOCKET_PREFIX}%`, `${REAP_PENDING_PREFIX}%`),
+  );
+}
 export const REX_QUICK_EXIT_MS = 1000;
 export const rexWindowKey = (projectId: number): string => `terminal:rex:window:${projectId}`;
 export const rexSocketOf = (server: string): string => `${REX_SOCKET_PREFIX}${server}`;

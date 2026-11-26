@@ -92,7 +92,7 @@ flowchart TB
 
 `agent_fork` reuses `launchAgent` for a new row and pane. It stores source lineage and the first-assignment latch in that row's insert. Claude receives a fresh session id with `--resume <source> --fork-session`. Codex gets a fresh `CODEX_HOME`, seeded from the source's completed rollout, and starts with `-C <cwd> fork <source>`. Hive binds the Codex session only after its new `session_meta` names the captured source session. A source-session hook is rejected before it can bind identity, clear the latch, write worker state, or fire a context checkpoint (`agent_fork`, `src/tools/agents.ts:929`; `seedCodexFork` and `findCodexFork`, `src/codexHome.ts:95,149`; `acceptsForkHook`, `src/hook.ts:83`).
 
-**A stale claim this diagram corrects rather than repeats:** nothing is typed into a spawned worker's pane. Commit `5cdf71b` (2026-08-13) removed that behavior, so the receipt field is `ready`, not `announced`. `agent_spawn`'s tool description (`src/tools/agents.ts:591`, which correctly says the worker is `briefed automatically`) and two spots in `src/help.ts:109,170` (which correctly say a worker `briefs itself`) once also described a typed first turn and a window-only spawn, and no longer do.
+**A stale claim this diagram corrects rather than repeats:** nothing is typed into a spawned worker's pane. Commit `5cdf71b` (2026-08-13) removed that behavior, so the receipt field is `ready`, not `announced`. `agent_spawn`'s tool description (`src/tools/agents.ts:591`, which correctly says the worker is `briefed automatically`) and two spots in `src/help.ts:98,170` (which correctly say a worker `briefs itself`) once also described a typed first turn and a window-only spawn, and no longer do.
 
 ```mermaid
 sequenceDiagram

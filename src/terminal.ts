@@ -12,7 +12,7 @@ import {
   rexRespawn,
   rexProbe,
   rexReapExited,
-  rexReapPending,
+  rexReapPending, rexReleaseInUse,
   rexRowProbe,
   rexSendKey,
   rexSendKeys,
@@ -20,7 +20,7 @@ import {
   rexSendText,
   rexSnapshot,
   rexTitle,
-  type RexSnapshot,
+  type RexSnapshot, type RexSubagents,
 } from "./terminal/rex.js";
 import {
   cancelCopyMode as tmuxCancelCopyMode,
@@ -299,6 +299,12 @@ export function programStatusBlocks(target: string, snap: TerminalSnapshot | nul
   return status.state === "blocked" || (status.kind !== null && BLOCKING_STATUS_KINDS.has(status.kind));
 }
 
+export function rowSubagents(row: { tmux_target: string; tmux_socket: string }, snap: AliveSnapshot | null | undefined): RexSubagents | null {
+  if (!rexRow(row.tmux_socket, row.tmux_target)) return null;
+  const rex = rexOf(snap);
+  return rex?.answered ? (rex.blocks.get(row.tmux_target)?.subagents ?? null) : null;
+}
+
 export function rowSnapshot(row: RowPaneIdentity): TerminalSnapshot | undefined {
   if (!rexRow(row.tmux_socket, row.tmux_target) || row.tmux_target === "") return undefined;
   const rex = rexSnapshot(rexServerFor(row.tmux_socket, row.tmux_target), [row.tmux_target]);
@@ -329,7 +335,9 @@ export function reapExitedBlock(row: { id: number; project_id: number; tmux_targ
 }
 
 export function reapPendingBlocks(snapshot: AliveSnapshot | null): void {
-  if (rexActive()) rexReapPending(rexOf(snapshot));
+  if (!rexActive()) return;
+  rexReapPending(rexOf(snapshot));
+  rexReleaseInUse();
 }
 
 export function targetLiveProbe(target: string): PaneProbe {
@@ -440,7 +448,7 @@ export function paneAwaitingChoice(target: string): boolean | null {
 
 export function codexInputBoxState(target: string): InputBoxState | null {
   if (!isRexTarget(target)) return tmuxCodexInputBoxState(target);
-  return rexScreen(() => codexInputBoxStateFromRaw(styledTail(target), null), null);
+  return rexScreen(() => codexInputBoxStateFromRaw(styledTail(target)), null);
 }
 
 export function codexTrailerView(target: string): TrailerView | null {

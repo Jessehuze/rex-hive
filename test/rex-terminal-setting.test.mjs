@@ -114,7 +114,7 @@ describe("terminal setting", () => {
     assert.deepEqual(quiet, []);
   });
 
-  it("doctor's config terminal row shows the resolved terminal and its source", { skip: hasTmux ? false : "tmux is not installed" }, async () => {
+  it("doctor's config terminal row shows the resolved terminal and its source, and is absent when nothing chose one", { skip: hasTmux ? false : "tmux is not installed" }, async () => {
     const doctor = async ({ global, env = {} }) => {
       const own = scratchDirs();
       const opts = { cwd: own.projectDir, dataDir: own.dataDir, tmp: own.tmp };
@@ -124,7 +124,7 @@ describe("terminal setting", () => {
     };
     assert.match(await doctor({ global: "terminal: rex\n" }), /info {2}config terminal: "rex" \(source: global\)/);
     assert.match(await doctor({ env: { HIVE_TERMINAL: "rex" } }), /info {2}config terminal: "rex" \(source: env\)/);
-    assert.match(await doctor({}), /info {2}config terminal: "tmux" \(source: default\)/);
+    assert.doesNotMatch(await doctor({}), /config terminal/);
     assert.match(
       await doctor({ env: { HIVE_TERMINAL: "TMUX" } }),
       /warn {2}config terminal: HIVE_TERMINAL: terminal must be "tmux" or "rex"; ignoring "TMUX"\./,
@@ -217,7 +217,7 @@ describe("terminal setting", () => {
     );
   });
 
-  it("hive setup names an unknown HIVE_TERMINAL once on its terminal line", async () => {
+  it("hive setup names an unknown HIVE_TERMINAL once, and prints no terminal line when nothing chose one", async () => {
     const own = scratchDirs();
     const result = await runCli(["setup", "--dir", join(own.tmp, "bin"), "--force"], {
       cwd: own.projectDir,
@@ -228,7 +228,7 @@ describe("terminal setting", () => {
     assert.equal(result.code, 0, result.stdout + result.stderr);
     const warning = '! HIVE_TERMINAL: terminal must be "tmux" or "rex"; ignoring "TMUX".';
     assert.equal(result.stderr.split(warning).length - 1, 1, result.stderr);
-    assert.match(result.stdout, /terminal {5}tmux \(source: default\)/);
+    assert.doesNotMatch(result.stdout, /^terminal /m);
   });
 
   it("rexInUse reads the kv flag and the cwd project's terminal and never runs rex", async () => {
