@@ -5,7 +5,8 @@ export const REX_TIMEOUT = "10s";
 const KILL_MARGIN_MS = 2000;
 const REX_MAX_BUFFER = 128 * 1024 * 1024;
 const DURATION = /^(?:\d+(?:\.\d+)?(?:ms|s|m|h))+$/;
-const UNREACHABLE = /connection refused|no such file or directory|not running|could not connect|cannot connect|unreachable|no server/i;
+const NO_SERVER_EXIT = 4;
+const NO_SERVER = /no Rex server is running at /;
 const REX_TIMED_OUT = /deadline exceeded|timed out|i\/o timeout/i;
 const API_CODE = /\b(session_not_found|method_not_found|not_found|bad_request|conflict|unauthorized|forbidden|internal)\b/;
 
@@ -65,7 +66,7 @@ function classify(err: unknown, verb: string, killMs: number): RexError {
   if (e.code === "ETIMEDOUT" || e.signal) {
     return new RexTimeoutError(`rex ${verb} did not finish within ${killMs}ms and was killed`, stderr, killMs);
   }
-  if (UNREACHABLE.test(stderr)) return new RexUnavailableError(`the Rex server is unreachable: ${stderr}`, "unreachable", stderr);
+  if (e.status === NO_SERVER_EXIT || NO_SERVER.test(stderr)) return new RexUnavailableError(`the Rex server is unreachable: ${stderr}`, "unreachable", stderr);
   if (REX_TIMED_OUT.test(stderr)) return new RexTimeoutError(`rex ${verb} timed out: ${stderr}`, stderr, durationMs(rexTimeout()));
   const code = API_CODE.exec(stderr)?.[1] ?? `exit ${e.status ?? "?"}`;
   return new RexError(`rex ${verb} failed: ${stderr || code}`, code, stderr);
@@ -110,17 +111,9 @@ export function rexLua<T>(server: string, script: string): T {
   return parseJson<T>(rexRun(server, ["do", "-e", script, "--json"]), "do");
 }
 
-function serverAddressOf(who: unknown): string | null {
-  if (!who || typeof who !== "object") return null;
-  const w = who as Record<string, unknown>;
-  const server = w.server;
-  if (typeof server === "string" && server) return server;
-  if (server && typeof server === "object") {
-    const s = server as Record<string, unknown>;
-    for (const key of ["address", "url"]) if (typeof s[key] === "string" && s[key]) return s[key] as string;
-  }
-  for (const key of ["server_address", "address"]) if (typeof w[key] === "string" && w[key]) return w[key] as string;
-  return null;
+function endpointOf(who: unknown): string | null {
+  const endpoint = (who as { endpoint?: unknown } | null)?.endpoint;
+  return typeof endpoint === "string" && endpoint ? endpoint : null;
 }
 
 let cachedServer: string | null = null;
@@ -130,7 +123,7 @@ export function defaultRexServer(): string | null {
   if (fromEnv) return fromEnv;
   if (cachedServer) return cachedServer;
   try {
-    cachedServer = serverAddressOf(JSON.parse(rexRun(null, ["whoami", "--json"])));
+    cachedServer = endpointOf(JSON.parse(rexRun(null, ["whoami", "--json"])));
   } catch {
     return null;
   }

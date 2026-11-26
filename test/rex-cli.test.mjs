@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -11,6 +11,7 @@ const tmp = mkdtempSync(join(tmpdir(), "hive-rex-cli-"));
 const fake = isolateRex(tmp);
 const REX_ADDR = fake.env.REX_SERVER;
 const SHELL = "com.superlogical.terminal.shell";
+const NO_SERVER_MESSAGE = (url) => `Error: no Rex server is running at ${url.replace(/^unix:\/\//, "")}, and autostart is disabled`;
 
 const cli = () => import("../dist/rexCli.js");
 
@@ -95,7 +96,7 @@ describe("rex CLI wrapper", () => {
     try {
       assert.throws(
         () => rexApi(REX_ADDR, "session.list", {}),
-        (e) => e instanceof RexUnavailableError && /connection refused/.test(e.stderr),
+        (e) => e instanceof RexUnavailableError && e.code === "unreachable" && e.stderr === NO_SERVER_MESSAGE(REX_ADDR),
       );
     } finally {
       fakeRexDo(tmp, "restartServer");
@@ -281,13 +282,13 @@ console.log(JSON.stringify(pids));`;
     await waitFor(() => !alive(pids[0]));
   });
 
-  it("stopServer fails every call with exit 1 and connection refused until restartServer", () => {
+  it("stopServer fails every call with real rex's exit 4 and no-server message until restartServer", () => {
     fakeRexDo(tmp, "stopServer");
     try {
       const bin = "rex";
       const r = spawnSync(bin, ["--autostart=false", "--timeout", "10s", "-S", REX_ADDR, "api", "call", "session.list"], { env: fake.env, encoding: "utf8" });
-      assert.equal(r.status, 1);
-      assert.match(r.stderr, /connection refused/);
+      assert.equal(r.status, 4);
+      assert.equal(r.stderr, `${NO_SERVER_MESSAGE(REX_ADDR)}\n`);
     } finally {
       fakeRexDo(tmp, "restartServer");
     }
@@ -298,6 +299,32 @@ console.log(JSON.stringify(pids));`;
     const r = spawnSync(bin, ["--timeout", "10s", "-S", REX_ADDR, "api", "call", "session.list"], { env: fake.env, encoding: "utf8" });
     assert.notEqual(r.status, 0);
     assert.match(r.stderr, /autostart/);
+  });
+});
+
+describe("real rex shapes the fake mirrors", () => {
+  const WHOAMI_KEYS = [
+    "principal", "account", "endpoint", "pid", "instance_id", "host_id", "started_at", "rex_version", "api_revision",
+    "exit_empty", "session_count", "log_path", "tailscale", "session_id", "window_id", "block_id",
+  ];
+
+  it("the fake's whoami --json has real rex's top-level keys, with the server URL in endpoint", () => {
+    const out = execFileSync("/bin/sh", ["-c", "rex --autostart=false --timeout 10s whoami --json"], { env: fake.env, encoding: "utf8" });
+    const who = JSON.parse(out);
+    assert.deepEqual(Object.keys(who).sort(), [...WHOAMI_KEYS].sort());
+    assert.deepEqual(Object.keys(who.principal).sort(), ["display", "gid", "kind", "pid", "transport", "uid"]);
+    assert.equal(who.endpoint, REX_ADDR);
+  });
+
+  it("every .vt fixture the rex fixture README lists exists and is non-empty", () => {
+    const dir = join(REPO, "test", "fixtures", "rex");
+    const readme = readFileSync(join(dir, "README.md"), "utf8");
+    const listed = [...readme.matchAll(/^\| `([\w.-]+\.vt)` \|/gm)].map((m) => m[1]);
+    assert.ok(listed.length >= 3, `README table lists ${listed.length} fixtures`);
+    for (const name of listed) {
+      assert.ok(existsSync(join(dir, name)), `${name} is missing`);
+      assert.ok(statSync(join(dir, name)).size > 0, `${name} is empty`);
+    }
   });
 });
 

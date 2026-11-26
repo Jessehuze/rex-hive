@@ -640,6 +640,10 @@ function durationMs(text) {
   return total;
 }
 
+function socketPathOf(url) {
+  return decodeURIComponent(String(url).replace(/^unix:\/\//, ""));
+}
+
 function emit(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
@@ -666,14 +670,31 @@ function main(argv) {
   const state = readState();
   const server = global.server ?? process.env.REX_SERVER ?? state.address;
   if (state.server !== "running" || server !== state.address) {
-    process.stderr.write(`Error: dial ${server}: connection refused\n`);
-    return 1;
+    process.stderr.write(`Error: no Rex server is running at ${socketPathOf(server)}, and autostart is disabled\n`);
+    return 4;
   }
   const [cmd, ...tail] = rest;
   switch (cmd) {
     case "whoami": {
       const f = flags(tail, { "--json": "json?" });
-      const who = { identity: { user: "fake" }, server: { address: state.address, label: "fake" }, location: { session_id: process.env.REX_SESSION ?? null, block_id: process.env.REX_BLOCK ?? null } };
+      const who = {
+        principal: { kind: "local", transport: "unix", display: "fake-user", uid: 1000, gid: 1000, pid: process.ppid },
+        account: "fake-account",
+        endpoint: state.address,
+        pid: process.pid,
+        instance_id: "fake-instance",
+        host_id: "fake-host",
+        started_at: "2026-01-01T00:00:00Z",
+        rex_version: "0.0.0-fake",
+        api_revision: 24,
+        exit_empty: false,
+        session_count: state.sessions.length,
+        log_path: join(DIR, "fake-rex.log"),
+        tailscale: { enabled: false },
+        session_id: process.env.REX_SESSION ?? "",
+        window_id: "",
+        block_id: process.env.REX_BLOCK ?? "",
+      };
       if (f.json) emit(who);
       else process.stdout.write(`server: ${state.address}\n`);
       return 0;
