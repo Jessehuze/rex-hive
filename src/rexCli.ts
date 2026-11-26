@@ -114,12 +114,12 @@ export function rexApi<T>(server: string, method: string, params: object): T {
   return parseJson<T>(rexRun(server, ["api", "call", method, viaStdin ? "-" : json], viaStdin ? json : undefined), method);
 }
 
-export function rexKey(server: string, block: string, key: string): void {
-  rexRun(server, ["send-key", "-b", block, key]);
+export function rexKey(server: string, block: string, key: string, session?: string): void {
+  rexRun(server, ["send-key", ...(session ? ["-s", session] : []), "-b", block, key]);
 }
 
-export function rexLua<T>(server: string, script: string): T {
-  return parseJson<T>(rexRun(server, ["do", "-e", script, "--json"]), "do");
+export function rexLua<T>(server: string, script: string, args?: object): T {
+  return parseJson<T>(rexRun(server, ["do", "-e", script, "--json", ...(args ? ["--args", JSON.stringify(args)] : [])]), "do");
 }
 
 function endpointOf(who: unknown): string | null {
@@ -145,37 +145,37 @@ export function defaultRexServer(): string | null {
 }
 
 export const SNAPSHOT_SCRIPT = `-- hive:snapshot v1
-local function try(method, args)
-  local ok, result = pcall(rex.call, method, args)
-  if ok then return result end
-  return nil
-end
-local out = { version = 1, sessions = {}, blocks = {} }
-for _, s in ipairs((try("session.list", {}) or {}).sessions or {}) do
-  local view = try("session.view", { session_id = s.session_id }) or {}
-  local windows = {}
-  for _, w in ipairs(view.windows or {}) do
-    local ids = {}
-    for _, layer in ipairs(w.layers or {}) do
-      for _, b in ipairs(layer.blocks or {}) do table.insert(ids, b.block_id) end
+local wanted = {}
+for _, id in ipairs((rex.args or {}).blocks or {}) do wanted[id] = true end
+local listed, err = rex.call("session.list", {})
+if not listed then error("session.list failed: " .. tostring(err)) end
+local blocks = {}
+local incomplete = false
+for _, s in ipairs(listed.sessions or {}) do
+  local held = rex.call("session.list_blocks", { session_id = s.session_id })
+  if not held then
+    incomplete = true
+  else
+    for _, b in ipairs(held.blocks or {}) do
+      local entry = {
+        session_id = s.session_id,
+        session_label = s.label or "",
+        window_id = b.window_id or "",
+        label = b.label or "",
+        placement = b.placement or "",
+        probed = false,
+      }
+      if wanted[b.block_id] then
+        local function method(name)
+          return rex.call("block.method", { session_id = s.session_id, block_id = b.block_id, method = name, args = {} })
+        end
+        entry.probed = true
+        entry.process = method("process")
+        entry.program_status = method("program_status")
+      end
+      blocks[b.block_id] = entry
     end
-    table.insert(windows, { window_id = w.window_id, label = w.label, block_ids = ids })
-  end
-  table.insert(out.sessions, { session_id = s.session_id, label = s.label, windows = windows })
-  for _, b in ipairs((try("session.list_blocks", { session_id = s.session_id }) or {}).blocks or {}) do
-    local function method(name)
-      return try("block.method", { session_id = s.session_id, block_id = b.block_id, method = name })
-    end
-    table.insert(out.blocks, {
-      block_id = b.block_id,
-      session_id = s.session_id,
-      window_id = b.window_id,
-      label = b.label,
-      placement = b.placement,
-      process = method("process"),
-      program_status = method("program_status"),
-    })
   end
 end
-return out
+return { version = 1, incomplete = incomplete, blocks = blocks }
 `;

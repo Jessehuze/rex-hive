@@ -4948,3 +4948,4 @@ try {
   console.log(errorMessage(e));
   process.exit(1);
 }
+import "./rexInUse.js";

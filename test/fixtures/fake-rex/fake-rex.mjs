@@ -278,6 +278,8 @@ function exitOf(block) {
 }
 
 function screenOf(block) {
+  const big = join(block.dir, "screen");
+  if (existsSync(big)) return readFileSync(big);
   if (block.screen !== null) return Buffer.from(block.screen);
   const file = join(block.dir, "output");
   return existsSync(file) ? readFileSync(file) : Buffer.alloc(0);
@@ -316,14 +318,15 @@ function blockMethod(state, params, method, args) {
     case "format": {
       const all = screenOf(block);
       const max = args?.max_bytes;
-      const content = max && all.length > max ? all.subarray(all.length - max) : all;
-      return { content: content.toString("utf8"), id: 1, total: all.length, eof: true };
+      if (!max) return { content: all.toString("utf8") };
+      if (all.length <= max) return { content: all.toString("utf8"), total: all.length, eof: true };
+      return { content: all.subarray(0, max).toString("utf8"), id: 7, total: all.length, eof: false };
     }
     case "blob_read": {
       const all = screenOf(block);
       const start = args?.offset ?? 0;
-      const end = args?.max_bytes ? start + args.max_bytes : all.length;
-      return { content: all.subarray(start, end).toString("utf8"), id: args?.id ?? 1, total: all.length, eof: end >= all.length };
+      const end = Math.min(all.length, start + (args?.max_bytes || 49152));
+      return { data: all.subarray(start, end).toString("utf8"), id: args?.id ?? 7, total: all.length, eof: end >= all.length };
     }
     case "title":
       return { title: block.title ?? block.label, owner: null };
@@ -381,7 +384,8 @@ function resolveTargets(state, params) {
     results: (params.queries ?? []).map((query) => {
       const found = [];
       if (kinds.includes("session")) {
-        for (const s of state.sessions) if (inScope(s.session_id) && matches(s.session_id, s.label, query)) found.push({ kind: "session", session_id: s.session_id, label: s.label, where: "server" });
+        const holder = !kinds.includes("block") ? state.blocks[query]?.session_id : undefined;
+        for (const s of state.sessions) if (inScope(s.session_id) && (s.session_id === holder || matches(s.session_id, s.label, query))) found.push({ kind: "session", session_id: s.session_id, label: s.label, where: "server" });
       }
       if (kinds.includes("window")) {
         for (const w of state.windows) if (inScope(w.session_id) && matches(w.window_id, w.label, query)) found.push({ kind: "window", session_id: w.session_id, window_id: w.window_id, label: w.label, where: "session" });
@@ -552,24 +556,27 @@ function apiCall(state, method, params) {
   }
 }
 
-function snapshot(state) {
-  return {
-    version: 1,
-    sessions: state.sessions.map((s) => ({
-      session_id: s.session_id,
-      label: s.label,
-      windows: state.windows.filter((w) => w.session_id === s.session_id).map((w) => ({ window_id: w.window_id, label: w.label, block_ids: w.layers.flatMap((l) => l.blocks) })),
-    })),
-    blocks: Object.values(state.blocks).map((b) => ({
-      block_id: b.block_id,
-      session_id: b.session_id,
-      window_id: b.window_id,
-      label: b.label,
-      placement: b.window_id ? "placed" : "detached",
-      process: processInfo(b),
-      program_status: { records: b.program_status },
-    })),
-  };
+const luaJson = (value) => (Array.isArray(value) && value.length === 0 ? {} : value);
+
+function snapshot(state, args) {
+  const wanted = new Set(args?.blocks ?? []);
+  const blocks = {};
+  for (const s of state.sessions) {
+    for (const b of Object.values(state.blocks).filter((x) => x.session_id === s.session_id)) {
+      const entry = { session_id: s.session_id, session_label: s.label ?? "", window_id: b.window_id ?? "", label: b.label ?? "", placement: b.window_id ? "placed" : "detached", probed: false };
+      if (wanted.has(b.block_id)) {
+        const proc = processInfo(b);
+        entry.probed = true;
+        entry.process = { ...proc, ancestors: luaJson(proc.ancestors) };
+        if (proc.last_exit === null) delete entry.process.last_exit;
+        if (proc.child === null) delete entry.process.child;
+        if (proc.foreground === null) delete entry.process.foreground;
+        entry.program_status = { records: luaJson(b.program_status) };
+      }
+      blocks[b.block_id] = entry;
+    }
+  }
+  return { version: 1, incomplete: false, blocks };
 }
 
 function parseParams(raw) {
@@ -625,6 +632,12 @@ function fakeOp(op, raw) {
       }
       case "setScreen":
         state.blocks[args.block_id].screen = args.text;
+        return {};
+      case "setScreenFile":
+        writeFileSync(join(state.blocks[args.block_id].dir, "screen"), readFileSync(args.file));
+        return {};
+      case "setBracketedPaste":
+        state.blocks[args.block_id].bracketed = args.on;
         return {};
       case "setTitle":
         state.blocks[args.block_id].title = args.title;
@@ -754,6 +767,7 @@ function main(argv) {
       if (!f.block) fail("bad_request", "the fake needs -b BLOCK");
       withLock((s) => {
         const block = resolveBlockRef(s, f.block);
+        if (f.session && block.session_id !== f.session && sessionById(s, block.session_id)?.label !== f.session) fail("not_found", `block ${f.block} is not in session ${f.session}`);
         for (const key of f._) sendKey(block, key);
       });
       return 0;
@@ -765,7 +779,7 @@ function main(argv) {
     case "do": {
       const f = flags(tail, { "-e": "code", "--eval": "code", "--json": "json?", "-s": "session", "-b": "block", "--args": "args" });
       if (typeof f.code !== "string" || f.code.split("\n")[0] !== SNAPSHOT_HEADER) fail("bad_request", "the fake runs only the hive snapshot script");
-      const snap = snapshot(readState());
+      const snap = snapshot(readState(), f.args ? parseParams(f.args) : {});
       if (f.json) emit(snap);
       else process.stdout.write(`${JSON.stringify(snap, null, 2)}\n`);
       return 0;

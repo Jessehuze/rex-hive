@@ -231,15 +231,18 @@ describe("rex CLI wrapper", () => {
     const { rexLua, SNAPSHOT_SCRIPT } = await cli();
     assert.equal(SNAPSHOT_SCRIPT.split("\n")[0], "-- hive:snapshot v1");
     const b = await newBlock(["sleep", "30"], "snap");
+    const other = await newBlock(["sleep", "30"], "snap-other");
     const before = realCalls().length;
-    const snap = rexLua(REX_ADDR, SNAPSHOT_SCRIPT);
+    const snap = rexLua(REX_ADDR, SNAPSHOT_SCRIPT, { blocks: [b.block] });
     const [call] = realCalls().slice(before);
-    assert.deepEqual(call.argv.slice(-4), ["do", "-e", SNAPSHOT_SCRIPT, "--json"]);
-    assert.ok(snap.sessions.some((s) => s.session_id === b.session));
-    const entry = snap.blocks.find((x) => x.block_id === b.block);
+    assert.deepEqual(call.argv.slice(-6), ["do", "-e", SNAPSHOT_SCRIPT, "--json", "--args", JSON.stringify({ blocks: [b.block] })]);
+    const entry = snap.blocks[b.block];
     assert.equal(entry.session_id, b.session);
+    assert.equal(entry.probed, true);
     assert.equal(entry.process.child.pid, fake.state().blocks[b.block].child_pid);
-    assert.ok(Array.isArray(entry.program_status.records));
+    assert.deepEqual(entry.program_status.records, {}, "an empty Lua table encodes as an object, as on real Rex");
+    assert.equal(snap.blocks[other.block].probed, false, "a block hive did not ask about is listed but not probed");
+    assert.equal(snap.blocks[other.block].process, undefined);
   });
 
   it("rexLua refuses any script but the hive snapshot on the fake", async () => {

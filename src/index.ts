@@ -52,3 +52,4 @@ registerPrompts(server);
 startScheduler(schedulerIntervalMs());
 
 await server.connect(new StdioServerTransport());
+import "./rexInUse.js";
