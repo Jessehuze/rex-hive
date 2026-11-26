@@ -2,7 +2,7 @@ import { db } from "./db.js";
 import { captureQueenWriteIdentity, currentActor, resolveQueenLeadTarget } from "./context.js";
 import { findAgent, observeOwnership, notOwnedError, type AgentRow } from "./agentRecords.js";
 import { commandHead, screenClassifiable } from "./harnesses.js";
-import { findUnsafeControlChar, TEXT_ALLOWED_CONTROL_CHARS } from "./tmux.js";
+import { findUnsafeControlChar, TEXT_ALLOWED_CONTROL_CHARS } from "./tmux.js"; import { callerPane } from "./terminal.js";
 
 export function resolveAgentRef(projectId: number, ref: number | string): AgentRow {
   return typeof ref === "number"
@@ -64,7 +64,7 @@ export function resolveWakeDelivery(
     // Unknown never falls through to the ambient pane: that would bind this row's actor to a pane it may not own.
     if (ownership === "unknown") throw notOwnedError(target, ownership);
   }
-  const pane = process.env.TMUX_PANE;
+  const pane = callerPane();
   if (pane) return { actor, pane };
   throw new Error(
     "This session cannot receive wake-ups: it is not running inside tmux, so nothing can be typed into its terminal. Start the lead inside tmux (run tmux, then claude; watch with tmux attach, or tmux -CC attach for iTerm's native windows), or pass deliver_to targeting a spawned agent.",

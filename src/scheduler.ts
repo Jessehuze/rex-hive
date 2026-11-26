@@ -134,12 +134,12 @@ import {
   sanitizeTail,
   tailCaptureLines,
   sleep,
-  tmuxSocketPath,
   type AliveSnapshot,
   type InputBoxSnapshot,
   type InputBoxState, type RowOwnership,
   type RowPaneIdentity,
 } from "./tmux.js"; import {
+  callerSocket,
   capturePane,
   foreignSocket,
   liveTargets,
@@ -378,7 +378,7 @@ function recordTeardown(snapshot: AliveSnapshot, swept: CrewRowForRecord[]): Tea
     const observed = sightingIsFresh && socketLastSeenAlive! > newestEvidence;
     const record: TeardownRecord = {
       detected_at: detectedAt,
-      socket: tmuxSocketPath(process.env.TMUX, process.env.TMUX_TMPDIR),
+      socket: callerSocket(),
       trigger: TEARDOWN_TRIGGER,
       attribution: NOT_ATTRIBUTED,
       window: teardownWindow(

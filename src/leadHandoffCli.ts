@@ -9,7 +9,7 @@ import { ensureLeadHooksFile } from "./hooks.js";
 import { appendClaudeLeadArgs, crewPluginDir, isTrusted, leadIdentityEnv, renderLeadPosture } from "./leadLaunch.js";
 import { leadSidebarEnabled, loadProjectYml, quietMessagingEnabled } from "./projectYml.js";
 import { buildEnvFlags } from "./spawn.js";
-import { shellQuote, tmux, TmuxError, TmuxTimeoutError } from "./tmux.js"; import { panePidForRecord, rowOwnership } from "./terminal.js";
+import { shellQuote, TmuxError, TmuxTimeoutError } from "./tmux.js"; import { callerPane, panePidForRecord, respawnPane, rowOwnership } from "./terminal.js";
 import {
   automationBlocker,
   armManualHandoff,
@@ -90,7 +90,7 @@ export async function cmdLeadHandoff(argv: string[]): Promise<number> {
   const actor = process.env.HIVE_AGENT_ID ?? "";
   const lead = process.env.HIVE_LEAD === "1" ? runningLeadByActor(actor) : undefined;
   if (lead === undefined) return refuse("only a running lead can hand itself off");
-  if ((process.env.TMUX_PANE ?? "") !== lead.tmux_target || rowOwnership(lead) !== "live") {
+  if (callerPane() !== lead.tmux_target || rowOwnership(lead) !== "live") {
     return refuse("this is not running in the lead's own recorded pane");
   }
   const harnessProblem = manual ? handoffHarnessProblem(lead) : null;
@@ -301,7 +301,7 @@ async function graceLoop(argv: string[]): Promise<number> {
         if (current?.state !== "respawning" || current.attempt !== attempt || current.owner_token !== token) return 0;
       }
       try {
-        tmux("respawn-pane", "-k", "-t", row.pane_target, "-c", lead!.path, ...launch.env, launch.launch);
+        row.pane_target = respawnPane({ target: row.pane_target, cwd: lead!.path, env: launch.env, command: launch.launch }).target;
         return 0;
       } catch (e) {
         const detail = e instanceof Error ? e.message : String(e);
@@ -339,7 +339,7 @@ export async function runHandoffStart(argv: string[]): Promise<number> {
   if (row === null || (row.state !== "respawning" && row.state !== "ambiguous") || row.attempt !== attempt || row.owner_token !== parsed.token) {
     return refuse("this bootstrap does not own a respawning handoff");
   }
-  const pane = process.env.TMUX_PANE ?? "";
+  const pane = callerPane();
   if (pane !== row.pane_target) return refuse("this is not the pane the handoff respawned", id);
   const pid = panePidForRecord(pane);
   if (pid === "" || pid !== String(process.ppid)) return refuse("the pane's process id does not match this bootstrap's shell", id);

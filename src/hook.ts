@@ -250,12 +250,12 @@ async function stopProcessesForEndedLead(actorId: string, payload: HookPayload):
 // run before cmdLead records the new pane. The scheduler uses it only when the two pids agree.
 async function registerLeadMessagingSocket(actorId: string): Promise<void> {
   const raw = process.env.CLAUDE_CODE_MESSAGING_SOCKET ?? "";
-  const pane = process.env.TMUX_PANE ?? "";
   let socket = isAbsolute(raw) && !raw.includes("\0") ? raw : "";
   let pid = "";
-  if (socket !== "" && pane !== "") {
-    const { panePidForRecord } = await import("./terminal.js");
-    pid = panePidForRecord(pane);
+  if (socket !== "") {
+    const { callerPane, panePidForRecord } = await import("./terminal.js");
+    const pane = callerPane();
+    if (pane !== "") pid = panePidForRecord(pane);
   }
   if (pid === "") socket = "";
   db.prepare(

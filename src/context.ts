@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { storeDir } from "./dataDir.js";
 import { db } from "./db.js";
 import { LEAD_KIND } from "./agentKinds.js";
-import { rowOwnership } from "./terminal.js";
+import { callerPane, rowOwnership } from "./terminal.js";
 import { recordQueenRefusal, type QueenWriteIdentity } from "./queenAuditStore.js";
 import { gitOut } from "./git.js";
 
@@ -45,7 +45,7 @@ export function currentActor(): string {
      ON CONFLICT(id) DO UPDATE SET
        last_seen_at = datetime('now'),
        tmux_pane = COALESCE(excluded.tmux_pane, actors.tmux_pane)`,
-  ).run(id, name, kind, process.env.TMUX_PANE ?? null);
+  ).run(id, name, kind, callerPane() || null);
   cachedActorId = id;
   lastTouchMs = Date.now();
   return id;

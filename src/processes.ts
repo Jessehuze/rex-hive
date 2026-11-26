@@ -4,12 +4,12 @@ import { db } from "./db.js";
 import { loadProjectYml } from "./projectYml.js";
 import { closeAgentRow, currentOwnership, killAgentPane, paneIdentity, relayoutAfterPaneLeft } from "./spawn.js";
 import {
-  paneVisibility,
-  paneWindow,
-  projectWindows,
-  sessionName, tmux,
+  sessionName,
   type RowOwnership,
 } from "./tmux.js"; import {
+  paneVisibility,
+  paneWindow,
+  projectWindows, interruptPane,
   cancelCopyMode,
   observeRowOwnership,
   paneProcessExited,
@@ -208,7 +208,7 @@ export function stopProcess(row: StoppableRow, reason: StopReason): StoppedProce
     // In copy mode C-c is `cancel`, not SIGINT, so the graceful leg would silently do nothing to a
     // pane someone scrolled back in. A stop may take that scrollback position: the process is ending.
     cancelCopyMode(row.tmux_target);
-    tmux("send-keys", "-t", row.tmux_target, "C-c");
+    interruptPane(row.tmux_target);
   } catch {
 
   }

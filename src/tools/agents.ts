@@ -76,16 +76,13 @@ import { leadSessionEnded } from "../leadState.js";
 import {
   DEFAULT_LAYOUT,
   describePaneChoice,
-  ensureAttached,
   findUnsafeControlChar,
   holdsHumanInput,
   observationFailed,
   ownershipLiveness,
-  paneWindow,
   sessionName,
   sleep,
   TEXT_ALLOWED_CONTROL_CHARS,
-  tmux,
   TmuxTimeoutError,
   WINDOW_LAYOUTS,
   type AliveSnapshot,
@@ -96,6 +93,9 @@ import {
   capturePane,
   captureFinalScreen,
   cancelCopyMode,
+  ensureAttached,
+  paneWindow,
+  sendKeys,
   liveTargets,
   observeRowOwnership,
   paneCurrentCommand,
@@ -1699,7 +1699,7 @@ export function registerAgents(server: McpServer): void {
           if (args.keys.length === 2 && args.keys[0] === "-X" && args.keys[1] === "cancel") {
             cancelCopyMode(target);
           } else {
-            tmux("send-keys", "-t", target, "--", ...args.keys);
+            sendKeys(target, args.keys);
           }
         } else if (args.text != null) {
 
