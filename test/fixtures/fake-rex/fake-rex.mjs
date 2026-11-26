@@ -218,7 +218,7 @@ function execedProgram(command) {
 
 function reapCompleted(state) {
   for (const block of Object.values(state.blocks)) {
-    const exit = processInfo(block).last_exit;
+    const exit = lastExit(block);
     if (!exit || block.options?.exit?.on_completion === false) continue;
     const threshold = block.options?.exit?.quick_exit_threshold_ms ?? 250;
     const raw = exitOf(block);
@@ -503,20 +503,24 @@ function runningProgram(pid) {
   return { name: basename(words[0] ?? ""), argv0: words[0] ?? "", path: words[0] ?? "", invoked_path: words[0] ?? "", ...(script ? { script } : {}) };
 }
 
-function processInfo(block) {
+function lastExit(block) {
   const raw = exitOf(block);
   const { at: _at, ...ended } = raw ?? {};
-  const exit = raw && loginWrapped(block) ? { exit_code: 0 } : raw ? ended : null;
+  return raw && loginWrapped(block) ? { exit_code: 0 } : raw ? ended : null;
+}
+
+function processInfo(block) {
+  const exit = lastExit(block);
   if (loginWrapped(block) && block.child_pid && !exit) {
     const login = { pid: block.child_pid, name: "login", argv0: null, cwd: block.cwd, user: process.env.USER ?? "", user_id: process.getuid?.() ?? 0 };
     return { child: login, foreground: login, home: FAKE_HOME, last_exit: null };
   }
+  if (exit) return { home: FAKE_HOME, last_exit: exit };
   const program = block.restored ? null : execedProgram(block.command);
   const seen = block.restored ? runningProgram(block.child_pid) : { name: basename(program), argv0: program, path: program, invoked_path: program };
-  const proc = block.child_pid && !exit
+  const proc = block.child_pid
     ? { pid: block.child_pid, ...seen, cwd: block.cwd, user: process.env.USER ?? "", user_id: process.getuid?.() ?? 0 }
     : null;
-  if (exit) return { home: FAKE_HOME, last_exit: exit };
   return proc ? { child: proc, foreground: proc, home: FAKE_HOME, last_exit: null } : { home: FAKE_HOME, last_exit: null };
 }
 

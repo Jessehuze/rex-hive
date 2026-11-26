@@ -371,6 +371,24 @@ describe("Rex restart survival", () => {
     assert.equal(terminal.rowOwnership(blockRunning("other", ["sleep", "600"])), "reissued");
   });
 
+  it("a fake rex call that asks for no process runs no ps for restored blocks, so its state lock is not held per block", () => {
+    rexApi(process.env.REX_SERVER, "session.create", {
+      label: "s-ps-count",
+      initial_windows: [{ window_label: "ps", layout: { block: { flavor: "com.superlogical.terminal.shell", label: "ps", options: { shell: "none", login: false, command: ["sleep", "600"] } } } }],
+    });
+    fakeRexDo(dirs.tmp, "restartServer", { trust: false, env: { PATH: CLAUDE_PATH } });
+    const live = Object.values(fake.state().blocks).filter((b) => b.restored && !existsSync(join(b.dir, "exit.json")));
+    assert.ok(live.length > 0, "the restart left live restored blocks");
+    const shimDir = mkdtempSync(join(dirs.tmp, "ps-shim-"));
+    const count = join(shimDir, "count");
+    const realPs = spawnSync("/bin/sh", ["-c", "command -v ps"], { encoding: "utf8", env: rexEnv }).stdout.trim();
+    writeFileSync(join(shimDir, "ps"), `#!/bin/sh\necho x >> ${JSON.stringify(count)}\nexec ${JSON.stringify(realPs)} "$@"\n`);
+    chmodSync(join(shimDir, "ps"), 0o755);
+    const run = spawnSync("rex", ["--autostart=false", "--timeout", "5s", "api", "call", "session.list", "{}"], { encoding: "utf8", env: { ...fake.env, PATH: `${shimDir}:${fake.env.PATH}` } });
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(existsSync(count) ? readFileSync(count, "utf8").split("\n").filter(Boolean).length : 0, 0);
+  });
+
   it("hive setup --rex-resume prints the rule and writes nothing to Rex's config", async () => {
     const home = mkdtempSync(join(dirs.tmp, "home-"));
     const config = join(home, ".config", "rex");
