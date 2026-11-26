@@ -170,9 +170,9 @@ describe("output for a user who never chose Rex", () => {
     const d = scratchDirs();
     return { d, opts: (env = {}) => ({ cwd: d.projectDir, dataDir: d.dataDir, tmp: d.tmp, env: { ...plainEnv(), HIVE_NO_UPDATE_CHECK: "1", ...env } }) };
   };
-  const REX_USAGE = [/hive peek/, /--terminal/, /Rex only/, /# terminal:/, /# workers:/, /wait_for_port/];
+  const REX_USAGE = [/hive show\|hide <worker>/, /--terminal/, /wait_for_port/];
 
-  it("hive --help names no Rex command or key, and does once HIVE_TERMINAL=rex", async () => {
+  it("hive --help names no Rex flag or key beyond the always-listed peek command, and does once HIVE_TERMINAL=rex", async () => {
     const { opts } = own();
     const plain = await runCli(["--help"], opts());
     for (const re of REX_USAGE) assert.doesNotMatch(plain.stdout, re);
@@ -180,16 +180,15 @@ describe("output for a user who never chose Rex", () => {
     for (const re of REX_USAGE) assert.match(rex.stdout, re);
   });
 
-  it("hive init writes a hive.yml with no terminal, workers or wait_for_port lines, and with them once Rex is chosen", async () => {
+  it("hive init writes a hive.yml with no wait_for_port line unless Rex is chosen", async () => {
     const plain = own();
     assert.equal((await runCli(["init", "--no-profile"], plain.opts())).code, 0);
     const text = readFileSync(join(plain.d.projectDir, "hive.yml"), "utf8");
-    assert.match(text, /# lead: claude --model opus/);
-    for (const re of [/terminal:/, /workers:/, /wait_for_port/]) assert.doesNotMatch(text, re);
+    assert.match(text, /# {5}auto_start: false/);
+    assert.doesNotMatch(text, /wait_for_port/);
     const rex = own();
     assert.equal((await runCli(["init", "--no-profile"], rex.opts({ HIVE_TERMINAL: "rex" }))).code, 0);
-    const rexText = readFileSync(join(rex.d.projectDir, "hive.yml"), "utf8");
-    for (const re of [/# terminal: tmux/, /# workers: shown/, /wait_for_port: 3000/]) assert.match(rexText, re);
+    assert.match(readFileSync(join(rex.d.projectDir, "hive.yml"), "utf8"), /# {5}wait_for_port: 3000/);
   });
 
   it("hive setup prints no terminal line and lists no --terminal flag unless Rex or a terminal was chosen", async () => {
