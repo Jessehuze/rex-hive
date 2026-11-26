@@ -152,12 +152,9 @@ import {
   describePaneChoice,
   ensureSession,
   findProjectWindow,
-  foreignSocket,
   isViewSessionName,
   listOwnedWindows,
-  liveTargets,
   observationFailed,
-  observeRowOwnership,
   type OwnedWindow,
   ORPHAN_MIN_AGE_MS,
   type OrphanScratchServers,
@@ -166,7 +163,6 @@ import {
   paneIsAloneInWindow,
   paneWindow,
   paneVisibility,
-  panePidForRecord,
   type ProjectWindows,
   PROCESSES_LAYOUT,
   processesPaneTitle,
@@ -176,8 +172,6 @@ import {
   renderAttachCommand,
   resolveAttachTarget,
   resolveInTmuxTarget,
-  rowLive,
-  rowOwnership,
   type RowOwnership,
   type RowPaneIdentity,
   SESSION_PREFIX,
@@ -194,11 +188,17 @@ import {
   TMUX_NOT_INSTALLED_MESSAGE,
   tmuxNotInstalled, tmuxSaysNothingThere,
   tmuxTimeoutOverride,
-  tmuxSocketPath,
-  untrustedTmuxServer,
-  waitForPaneEstablished,
+  tmuxSocketPath, untrustedTmuxServer,
   windowLayout,
-} from "./tmux.js";
+} from "./tmux.js"; import {
+  foreignSocket,
+  liveTargets,
+  observeRowOwnership,
+  panePidForRecord,
+  rowLive,
+  rowOwnership,
+  waitForPaneEstablished,
+} from "./terminal.js";
 import { collectCrew, crewStoreProblem } from "./crew.js";
 import { resumeWorker, validateResumeWorker } from "./agentResume.js";
 import { markWorkerLost } from "./workerRecovery.js";

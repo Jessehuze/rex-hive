@@ -34,12 +34,12 @@ import { awaitingFirstPrompt } from "../firstPrompt.js";
 import { deriveProvenance } from "../stateProvenance.js";
 import {
   findUnsafeControlChar,
-  foreignSocket,
-  liveTargets,
   observationFailed,
-  rowOwnership,
   TEXT_ALLOWED_CONTROL_CHARS,
-} from "../tmux.js";
+} from "../tmux.js"; import {
+  foreignSocket, liveTargets,
+  rowOwnership,
+} from "../terminal.js";
 import { readLeadTurnState } from "../leadState.js";
 import { LEAD_TARGET_GONE, LEAD_TARGET_REISSUED, leadSubscription, paneVeto, runningLeadOf } from "../leadWatch.js";
 import { isRunningLeadActor, LEAD_KIND } from "../spawn.js";

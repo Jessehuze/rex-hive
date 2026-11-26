@@ -9,7 +9,7 @@ import { ensureLeadHooksFile } from "./hooks.js";
 import { appendClaudeLeadArgs, crewPluginDir, isTrusted, leadIdentityEnv, renderLeadPosture } from "./leadLaunch.js";
 import { leadSidebarEnabled, loadProjectYml, quietMessagingEnabled } from "./projectYml.js";
 import { buildEnvFlags } from "./spawn.js";
-import { panePidForRecord, rowOwnership, shellQuote, tmux, TmuxError, TmuxTimeoutError } from "./tmux.js";
+import { shellQuote, tmux, TmuxError, TmuxTimeoutError } from "./tmux.js"; import { panePidForRecord, rowOwnership } from "./terminal.js";
 import {
   automationBlocker,
   armManualHandoff,

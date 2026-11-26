@@ -26,7 +26,7 @@ import {
   STOP_HOLD_CAP_SECONDS,
   SUCCESSOR_NOT_READY,
 } from "./leadHandoffState.js";
-import { holdsHumanInput, paneInCopyMode, rowOwnership, tmuxSocketPath } from "./tmux.js";
+import { holdsHumanInput, tmuxSocketPath } from "./tmux.js"; import { paneInCopyMode, rowOwnership } from "./terminal.js";
 import { type LeadSafetySnapshot, type LeadTurnState, readLeadSafetySnapshot } from "./leadState.js";
 import type { LeadTurnBudget } from "./projectYml.js";
 import { readTurnCount } from "./turnCount.js";

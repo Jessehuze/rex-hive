@@ -8,7 +8,7 @@ import { ACTIVE_TIMER_WHERE as ACTIVE_WAKE_WHERE } from "./wakeSql.js";
 export { ACTIVE_WAKE_WHERE };
 import { leadSessionEnded, readLeadTurnState } from "./leadState.js";
 import { finishedIdle } from "./firstPrompt.js";
-import { liveTargets, ownershipLiveness, rowOwnership, type AliveSnapshot } from "./tmux.js";
+import { ownershipLiveness, type AliveSnapshot } from "./tmux.js"; import { liveTargets, rowOwnership } from "./terminal.js";
 
 export type PortfolioLane = "waiting_on_you" | "stuck" | "moving" | "quiet";
 
