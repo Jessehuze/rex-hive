@@ -210,8 +210,9 @@ import { collectCrew, crewStoreProblem } from "./crew.js";
 import { resumeWorker, validateResumeWorker } from "./agentResume.js";
 import { markWorkerLost } from "./workerRecovery.js";
 import type { AgentRow } from "./agentRecords.js";
-import { describeVisibility, formatLocal, processCounts } from "./dashboard.js";
+import { describeProcess, formatLocal, processCounts } from "./dashboard.js";
 import {
+  awaitStartedPorts,
   runningCommandRow,
   runningCommandRows,
   snapshotProcesses,
@@ -221,6 +222,7 @@ import {
   renderStart,
   type StartResult,
   STOP_REASONS,
+  WAIT_FOR_PORT_ON_TMUX,
 } from "./processes.js";
 import {
   activeProfile,
@@ -1950,7 +1952,13 @@ async function cmdStart(argv: string[]): Promise<void> {
   }
   const trusted = await ensureTrusted(project.id, name, proc.command, proc.dir, proc.env);
   const result = startYmlCommand(project, name, proc, config, trusted);
-  if (trusted) console.log(`${name}: ${renderStart(result)}`);
+  let ports = "";
+  if (result.status === "started" && proc.wait_for_port != null) {
+    const row = runningCommandRow(project.id, name);
+    if (row && isRexTarget(row.tmux_target)) ports = awaitStartedPorts(row, proc.wait_for_port);
+    else if (row) console.log(`${name}: ${WAIT_FOR_PORT_ON_TMUX}`);
+  }
+  if (trusted) console.log(`${name}: ${renderStart(result)}${ports}`);
   if (!trusted || result.status === "failed" || result.status === "refused") process.exitCode = 1;
 }
 
@@ -2478,7 +2486,7 @@ function cmdStatus(): void {
     }
     console.log(`\n${project.name}  (${project.path})  window: ${windowLabel}`);
     const procs = agents.some((a) => a.kind === "command") ? snapshotProcesses(project.id) : [];
-    const whereIs = new Map(procs.filter((p) => p.running).map((p) => [p.name, describeVisibility(p.visibility)]));
+    const whereIs = new Map(procs.filter((p) => p.running).map((p) => [p.name, describeProcess(p)]));
     for (const a of agents) {
 
       const state =
