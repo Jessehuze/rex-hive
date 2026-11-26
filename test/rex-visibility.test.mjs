@@ -18,7 +18,7 @@ const { db, migrate } = await import("../dist/db.js");
 migrate();
 await import("../dist/rexInUse.js");
 const { rexApi } = await import("../dist/rexCli.js");
-const { tick } = await import("../dist/scheduler.js");
+const { janitor, tick } = await import("../dist/scheduler.js");
 
 const clients = [];
 after(async () => {
@@ -247,9 +247,8 @@ describe("worker visibility on Rex", () => {
     assert.equal(peeked.code, 0, peeked.stdout + peeked.stderr);
     assert.match(peeked.stdout, /w-peek: peeking/);
     const mutating = apiCalls(before).filter((c) => MUTATING.includes(c.method));
-    assert.deepEqual(methods(mutating), ["session.set_layer_state", "session.focus_block"]);
-    assert.deepEqual([mutating[0].params.layer_id, mutating[0].params.state], [layer, "normal"]);
-    assert.equal(mutating[1].params.block_id, spawned.tmux_target);
+    assert.deepEqual(methods(mutating), ["session.set_layer_state"]);
+    assert.deepEqual([mutating[0].params.layer_id, mutating[0].params.state, mutating[0].params.focus], [layer, "normal", true]);
     const where = locate(spawned.tmux_target);
     assert.equal(where.layer.kind, "floating", "the worker is still a float, not in the split");
     assert.notEqual(where.layer.state, "minimized");
@@ -260,6 +259,40 @@ describe("worker visibility on Rex", () => {
     assert.match((await cli(["hide", "w-peek"], dir)).stdout, /w-peek: hidden/);
     assert.equal(locate(spawned.tmux_target).layer.state, "minimized");
     assert.equal(methods(apiCalls(mark)).includes("session.float_block"), false, "re-hiding a peeked float never floats it twice");
+  });
+
+  it("peek raises the worker above another float in the lead's tab", async () => {
+    const dir = freshProject("vis-peek-raise");
+    const { mcp } = await startLead(dir);
+    writeFileSync(join(dir, "hive.yml"), "workers: hidden\n");
+    const low = await spawn(mcp, "w-low", { placement: "split" });
+    const high = await spawn(mcp, "w-high", { placement: "split" });
+    const stack = () => locate(low.tmux_target).window.layers.map((l) => l.blocks.map((b) => b.block_id)[0]);
+    assert.ok(stack().indexOf(low.tmux_target) < stack().indexOf(high.tmux_target), "the fixture floats w-low below w-high");
+    assert.match((await cli(["peek", "w-high"], dir)).stdout, /w-high: peeking/);
+    assert.match((await cli(["peek", "w-low"], dir)).stdout, /w-low: peeking/);
+    const order = stack();
+    assert.equal(order.at(-1), low.tmux_target, `the peeked worker is the top layer: ${order.join(", ")}`);
+    assert.notEqual(locate(high.tmux_target).layer.state, "minimized", "the other float stays restored, now beneath it");
+  });
+
+  it("the janitor closing a worker's row forgets its remembered show placement", async () => {
+    const dir = freshProject("vis-forget");
+    const { project, mcp } = await startLead(dir);
+    writeFileSync(join(dir, "hive.yml"), "workers: hidden\nplacement: window\n");
+    const gone = await spawn(mcp, "w-gone", { placement: "split" });
+    const kept = await spawn(mcp, "w-kept", { placement: "split" });
+    const shownAs = (block) => db.prepare("SELECT value FROM kv WHERE project_id = ? AND key = ?").get(project.id, `terminal:rex:shown-as:${block}`)?.value;
+    assert.equal(shownAs(gone.tmux_target), "split", "the fixture remembers where the hidden worker shows");
+    assert.equal(shownAs(kept.tmux_target), "split");
+    await closeClients();
+    db.prepare("UPDATE agents SET created_at = datetime('now', '-10 minutes') WHERE project_id = ? AND name IN ('w-gone', 'w-kept')").run(project.id);
+    rexApi(REX_ADDR, "block.close", { session_id: fake.state().blocks[gone.tmux_target].session_id, block_id: gone.tmux_target });
+    janitor();
+    assert.equal(workerRow(project.id, "w-gone").status, "closed");
+    assert.equal(shownAs(gone.tmux_target), undefined, "the closed row's kv row is deleted");
+    assert.equal(workerRow(project.id, "w-kept").status, "running");
+    assert.equal(shownAs(kept.tmux_target), "split", "a live worker keeps its kv row");
   });
 
   it("hidden placement:window worker floats in the lead's tab and show gives it a new tab", async () => {

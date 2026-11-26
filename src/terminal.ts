@@ -5,6 +5,7 @@ import {
   rexBlockAlive,
   rexCapture,
   rexClose,
+  rexForgetShownAs,
   rexOwnership,
   rexProbe,
   rexReapExited,
@@ -283,6 +284,7 @@ const rexServerFor = (socket: string, target: string): string | null =>
 
 export function reapExitedBlock(row: { id: number; project_id: number; tmux_target: string; tmux_socket: string }, snapshot: AliveSnapshot | null): void {
   if (!rexRow(row.tmux_socket, row.tmux_target) || !row.tmux_target) return;
+  rexForgetShownAs(row.project_id, row.tmux_target);
   rexReapExited(row, row.tmux_target, rexServerFor(row.tmux_socket, row.tmux_target), rexOf(snapshot));
 }
 

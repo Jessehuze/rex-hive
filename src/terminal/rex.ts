@@ -1246,6 +1246,11 @@ export function rexRememberShownAs(projectId: number, target: string, placement:
   writeKv(projectId, rexShownAsKey(target), placement);
 }
 
+export function rexForgetShownAs(projectId: number, target: string): void {
+  if (store === null) return;
+  guarded(() => void sql().prepare("DELETE FROM kv WHERE project_id = ? AND key = ?").run(projectId, rexShownAsKey(target)), undefined);
+}
+
 export function rexShownAs(projectId: number, target: string): RexShownAs | null {
   if (store === null) return null;
   const row = guarded(
@@ -1284,7 +1289,6 @@ export function rexPeekBlock(projectId: number, name: string, target: string): s
   const spot = rexSpot(target, lead.tmux_target, leadServer(lead));
   if (spot === null) return rexCannotTell(name);
   if (!spot.floating) return `${name}: not hidden, so there is nothing to peek at`;
-  if (spot.minimized) rexApi(spot.server, "session.set_layer_state", { session_id: spot.session, layer_id: spot.layer, state: "normal" });
-  rexApi(spot.server, "session.focus_block", { session_id: spot.session, block_id: target });
+  rexApi(spot.server, "session.set_layer_state", { session_id: spot.session, layer_id: spot.layer, state: "normal", focus: true });
   return `${name}: peeking over the lead; hive hide ${name} minimizes it again`;
 }
