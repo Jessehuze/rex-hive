@@ -732,11 +732,18 @@ function reportMigrationResult(result: ReturnType<typeof migrateLegacyConfig>): 
   for (const warning of result.warnings) console.error(`! ${warning}`);
 }
 
-function refuseRexLead(config: { terminal: Terminal | null } | null): void {
+let terminalWarningsShown = false;
+
+function resolveTerminalAndWarn(config: { terminal: Terminal | null } | null): ReturnType<typeof resolveTerminal> {
   const warnings: string[] = [];
-  const { terminal } = resolveTerminal(config, warnings);
-  for (const w of warnings) console.error(`! ${w}`);
-  if (terminal !== "rex") return;
+  const resolved = resolveTerminal(config, warnings);
+  if (!terminalWarningsShown) for (const w of warnings) console.error(`! ${w}`);
+  if (warnings.length > 0) terminalWarningsShown = true;
+  return resolved;
+}
+
+function refuseRexLead(config: { terminal: Terminal | null } | null): void {
+  if (resolveTerminalAndWarn(config).terminal !== "rex") return;
   try {
     startRexLead();
   } catch (e) {
@@ -748,7 +755,7 @@ function refuseRexLead(config: { terminal: Terminal | null } | null): void {
 
 function unregisteredLeadRoot(path?: string): string | null {
   try {
-    if (agentProjectPin() != null) return null;
+    if (process.env.HIVE_PROJECT_LOCK === "1" && process.env.HIVE_AGENT_ID) return null;
     const dir = realpathSync(path ?? process.cwd());
     if (findProjectForDir(dir)) return null;
     return gitPrimaryRoot(dir) ?? dir;
@@ -2522,7 +2529,7 @@ function cmdSetup(argv: string[]): void {
   if (terminalArg) setTerminal(terminalArg);
   console.log(`\nattach mode  ${attachMode()}`);
   console.log(`auto-attach  ${resolvedAutoAttach().value}`);
-  const terminal = resolveTerminal(null);
+  const terminal = resolveTerminalAndWarn(null);
   console.log(`terminal     ${terminal.terminal} (source: ${terminal.source})`);
   if (attachArg === "raw") {
     console.log("\nRecommended ~/.tmux.conf setting for raw attach mode:");

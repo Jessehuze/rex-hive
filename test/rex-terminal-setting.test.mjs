@@ -220,6 +220,47 @@ describe("terminal setting", () => {
     assert.equal(registered.n, 0, "a refused lead in an unregistered dir must not register it");
   });
 
+  it("hive lead <registered path> from a pinned session with a closed row reaches the trust check, not a cached pin failure", async () => {
+    const { db } = await dist();
+    const dir = freshProject("closed-pin-target");
+    const opts = { cwd: dir, dataDir: dirs.dataDir, tmp: dirs.tmp };
+    assert.equal((await runCli(["init", "--no-profile"], opts)).code, 0);
+    writeFileSync(join(dir, "hive.yml"), "lead: closed-pin-untrusted-lead\n");
+    const project = db.prepare("SELECT id FROM projects WHERE path = ?").get(dir);
+    const actorId = "agent:closed-pin-preview";
+    db.prepare(
+      `INSERT INTO agents (project_id, actor_id, name, tmux_target, command, cwd, kind, status)
+       VALUES (?, ?, 'closed-pin-worker', '', 'sleep', ?, 'agent', 'closed')`,
+    ).run(project.id, actorId, dir);
+    const elsewhere = freshProject("closed-pin-cwd");
+    const result = await runCli(["lead", dir, "--detach"], {
+      cwd: elsewhere,
+      dataDir: dirs.dataDir,
+      tmp: dirs.tmp,
+      env: { HIVE_AGENT_ID: actorId, HIVE_PROJECT_LOCK: "1", HIVE_PROJECT_PATH: join(dirs.tmp, "gone", "nowhere") },
+    });
+    assert.equal(result.code, 1, result.stdout + result.stderr);
+    assert.doesNotMatch(result.stderr + result.stdout, /agents row is closed/);
+    assert.ok(
+      result.stderr.includes('hive lead: "lead" is not trusted; run hive lead <path> interactively once'),
+      result.stdout + result.stderr,
+    );
+  });
+
+  it("hive setup names an unknown HIVE_TERMINAL once on its terminal line", async () => {
+    const own = scratchDirs();
+    const result = await runCli(["setup", "--dir", join(own.tmp, "bin"), "--force"], {
+      cwd: own.projectDir,
+      dataDir: own.dataDir,
+      tmp: own.tmp,
+      env: { HIVE_TERMINAL: "TMUX" },
+    });
+    assert.equal(result.code, 0, result.stdout + result.stderr);
+    const warning = '! HIVE_TERMINAL: terminal must be "tmux" or "rex"; ignoring "TMUX".';
+    assert.equal(result.stderr.split(warning).length - 1, 1, result.stderr);
+    assert.match(result.stdout, /terminal {5}tmux \(source: default\)/);
+  });
+
   it("hive lead in an already registered project with terminal rex refuses and records no lead", async () => {
     const { db } = await dist();
     const dir = freshProject("lead-rex-registered");
@@ -317,6 +358,24 @@ describe("terminal setting against a live tmux lead", () => {
     const lead = leadRow(db, project.id);
     assert.match(lead.tmux_target, /^%\d+$/);
     assert.equal(terminalOfRow(lead), "tmux");
+  });
+
+  it("hive queen prints an unknown HIVE_TERMINAL warning once and starts on tmux", { skip: hasTmux ? false : "tmux is not installed" }, async () => {
+    const { db } = await dist();
+    const { sessionName } = await import("../dist/tmux.js");
+    sessionToClean = sessionName();
+    const claude = makeFakeClaude(dirs.tmp)("sleep 600");
+    const result = await runCli(["queen", "--no-dashboard"], {
+      cwd: dirs.projectDir,
+      dataDir: dirs.dataDir,
+      tmp: dirs.tmp,
+      env: { HIVE_TERMINAL: "TMUX", PATH: `${dirname(claude)}:${process.env.PATH}` },
+    });
+    assert.equal(result.code, 0, result.stdout + result.stderr);
+    const warning = '! HIVE_TERMINAL: terminal must be "tmux" or "rex"; ignoring "TMUX".';
+    assert.equal((result.stdout + result.stderr).split(warning).length - 1, 1, result.stdout + result.stderr);
+    const queen = db.prepare("SELECT id FROM projects WHERE name = 'queen'").get();
+    assert.match(leadRow(db, queen.id).tmux_target, /^%\d+$/);
   });
 
   it("a worker spawned under a tmux lead stays tmux after hive.yml switches to rex", { skip: hasTmux ? false : "tmux is not installed" }, async () => {
