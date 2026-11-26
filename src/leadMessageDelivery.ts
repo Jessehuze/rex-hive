@@ -34,6 +34,7 @@ import {
   TmuxTimeoutError, type AliveSnapshot,
   type RowPaneIdentity,
 } from "./tmux.js"; import {
+  isRexTarget,
   paneInCopyMode,
   sendText,
 } from "./terminal.js";
@@ -185,7 +186,8 @@ function retargetAfterHandoff(row: DeliveryRow): DeliveryRow {
   const lead = db.prepare("SELECT * FROM agents WHERE id = ? AND kind = 'lead' AND status = 'running'").get(row.to_agent_id) as
     | AgentRow
     | undefined;
-  if (lead === undefined || accepted.pane_pid === lead.pane_pid || accepted.tmux_target !== lead.tmux_target) return row;
+  const movedBlock = isRexTarget(lead?.tmux_target ?? "") && isRexTarget(accepted.tmux_target ?? "");
+  if (lead === undefined || accepted.pane_pid === lead.pane_pid || (accepted.tmux_target !== lead.tmux_target && !movedBlock)) return row;
   const handedOff = db
     .prepare(
       `SELECT 1 AS hit FROM lead_handoffs WHERE lead_agent_id = ? AND pane_target = ? AND predecessor_pane_pid = ?

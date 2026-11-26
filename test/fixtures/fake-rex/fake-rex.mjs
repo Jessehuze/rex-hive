@@ -175,7 +175,8 @@ function execedProgram(command) {
     if (words[0] && words[0] !== "exec") return words[0];
     if (words[1]) return words[1];
   }
-  return program;
+  const tail = basename(program) === "sh" && command[i + 1] === "-c" && typeof script === "string" ? script.split("&&").at(-1).trim().match(/^exec\s+'?([^\s']+)/) : null;
+  return tail ? tail[1] : program;
 }
 
 function reapCompleted(state) {
@@ -602,6 +603,7 @@ const SCHEMAS = {
   "session.set_window_label": { keys: ["label", "session_id", "window_id"], required: ["session_id", "window_id"] },
   "target.resolve": { keys: ["context", "kinds", "queries", "scope"], required: ["kinds", "queries"] },
   "session.move_block": { keys: ["anchor_block_id", "block_id", "direction", "ratio", "session_id", "side"], required: ["session_id", "block_id", "anchor_block_id"] },
+  "block.close": { keys: ["block_id", "keep_last", "session_id", "undoable", "window_id"], required: ["session_id"] },
   "session.float_block": { keys: ["block_id", "bounds", "session_id"], required: ["session_id", "block_id", "bounds"] },
   "session.set_layer_state": { keys: ["focus", "layer_id", "session_id", "state"], required: ["session_id", "layer_id", "state"] },
   "session.resize_layer": { keys: ["bounds", "layer_id", "session_id"], required: ["session_id", "layer_id", "bounds"] },
@@ -624,6 +626,8 @@ function checkSchema(method, params) {
   for (const key of schema.required) if (params[key] === undefined || params[key] === null) fail("bad_request", `${method} needs ${key}`);
   if (method === "session.new_split" && !["horizontal", "vertical"].includes(params.direction)) fail("bad_request", "direction is horizontal or vertical");
   if (method === "session.new_split" && !["before", "after"].includes(params.side)) fail("bad_request", "side is before or after");
+  if (method === "session.move_block" && ![undefined, null, "horizontal", "vertical"].includes(params.direction)) fail("bad_request", "direction is horizontal or vertical");
+  if (method === "session.move_block" && ![undefined, null, "before", "after"].includes(params.side)) fail("bad_request", "side is before or after");
 }
 
 function apiCall(state, method, params) {
@@ -1022,6 +1026,8 @@ function main(argv) {
       const f = flags(tail.slice(1), { "-s": "session", "--session": "session" });
       const [method, raw] = f._;
       const params = parseParams(raw);
+      const [sleepOn, sleepFor] = (process.env.FAKE_REX_SLEEP_ON ?? "").split(":");
+      if (sleepOn === method) sleepMs(Number(sleepFor) || 0);
       emit(withLock((s) => {
         if (f.session && !params.session_id) {
           const found = s.sessions.find((x) => x.session_id === f.session || x.label === f.session);
