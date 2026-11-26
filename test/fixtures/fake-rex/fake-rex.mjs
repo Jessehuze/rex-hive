@@ -1,5 +1,5 @@
-import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { execFileSync, spawn } from "node:child_process";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -133,18 +133,51 @@ function requireBlock(state, params) {
   return block;
 }
 
+const FRESH_ENV_KEYS = ["HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "NODE_TEST_CONTEXT", "FAKE_REX_STATE", "FAKE_REX_OWNER"];
+
+function freshEnv(extra) {
+  const env = { PATH: MINIMAL_PATH, SHELL: "/bin/sh" };
+  for (const k of FRESH_ENV_KEYS) if (process.env[k] !== undefined) env[k] = process.env[k];
+  return { ...env, ...extra };
+}
+
 function childEnv(state, block) {
-  const env = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (k.startsWith("REX_") || k.startsWith("HIVE_") || k === "OSC7577_TOKEN" || (k.startsWith("FAKE_REX_") && k !== "FAKE_REX_STATE" && k !== "FAKE_REX_OWNER")) continue;
-    env[k] = v;
+  let env = {};
+  if (block.fresh_env) env = { ...block.fresh_env };
+  else {
+    for (const [k, v] of Object.entries(process.env)) {
+      if (k.startsWith("REX_") || k.startsWith("HIVE_") || k === "OSC7577_TOKEN" || (k.startsWith("FAKE_REX_") && k !== "FAKE_REX_STATE" && k !== "FAKE_REX_OWNER")) continue;
+      env[k] = v;
+    }
+    if (!loginWrapped(block)) env.PATH = MINIMAL_PATH;
   }
-  if (!loginWrapped(block)) env.PATH = MINIMAL_PATH;
   env.REX_SERVER = state.address;
   env.REX_BLOCK = block.block_id;
   env.REX_SESSION = block.session_id;
+  env.OSC7577_TOKEN = block.token;
   return env;
 }
+
+const RESUME_REPORT = /\x1b\]7577;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
+const RESUME_TIME_WINDOW_S = 60;
+
+function resumeRecord(block) {
+  const file = join(block.dir, "output");
+  const text = existsSync(file) ? readFileSync(file, "utf8") : "";
+  let record = null;
+  for (const [, body] of text.matchAll(RESUME_REPORT)) {
+    const cut = body.lastIndexOf(":mac=");
+    if (cut < 0 || !block.token) continue;
+    const head = body.slice(0, cut);
+    if (createHash("sha256").update(`${head}:${block.token}`).digest("hex") !== body.slice(cut + 5)) continue;
+    const pairs = Object.fromEntries(head.split(":").map((p) => [p.slice(0, p.indexOf("=")), p.slice(p.indexOf("=") + 1)]));
+    if (Math.abs(Date.now() / 1000 - Number(pairs.time)) > RESUME_TIME_WINDOW_S || Number(pairs.pid) !== block.child_pid) continue;
+    record = pairs.clear === "1" ? null : { argv: pairs.argv.split(",").map((a) => Buffer.from(a, "base64").toString("utf8")) };
+  }
+  return record;
+}
+
+const newToken = () => randomBytes(24).toString("base64url");
 
 const BLOCK_OPTION_KEYS = new Set(["args", "command", "cwd", "exit", "initial_input", "interactive", "login", "path_prepend", "shell", "size", "theme"]);
 const EXIT_OPTION_KEYS = new Set(["on_completion", "quick_exit_threshold_ms"]);
@@ -170,6 +203,10 @@ function execedProgram(command) {
   }
   const program = command[i] ?? command[0];
   const script = command[i + 2];
+  const rest = command.indexOf("--", i + 3);
+  if (basename(program) === "sh" && command[i + 1] === "-c" && typeof script === "string" && script.endsWith('exec "$@"') && rest > 0) {
+    return execedProgram(command.slice(rest + 1));
+  }
   if (basename(program) === "sh" && command[i + 1] === "-c" && typeof script === "string" && SH_SIMPLE.test(script)) {
     const words = script.trim().split(/\s+/).filter((w) => !ENV_WORD.test(w));
     if (words[0] && words[0] !== "exec") return words[0];
@@ -205,6 +242,7 @@ function startProcess(state, block) {
   writeFileSync(join(block.dir, "output"), "");
   const owner = process.env.FAKE_REX_OWNER ?? "0";
   block.started_at = Date.now();
+  block.token = newToken();
   const relay = spawn(process.execPath, [RELAY, block.dir, block.cwd, STATE, owner, ...block.command], {
     detached: true,
     stdio: "ignore",
@@ -455,6 +493,16 @@ function jsonBoundedSlice(buf, start, maxBytes) {
   }
 }
 
+function runningProgram(pid) {
+  let args = "";
+  try {
+    args = execFileSync("ps", ["-o", "args=", "-p", String(pid)], { encoding: "utf8" }).trim();
+  } catch {}
+  const words = args.split(/\s+/).filter(Boolean);
+  const script = basename(words[0] ?? "") === "node" && words[1] && !words[1].startsWith("-") ? words[1] : undefined;
+  return { name: basename(words[0] ?? ""), argv0: words[0] ?? "", path: words[0] ?? "", invoked_path: words[0] ?? "", ...(script ? { script } : {}) };
+}
+
 function processInfo(block) {
   const raw = exitOf(block);
   const { at: _at, ...ended } = raw ?? {};
@@ -463,8 +511,10 @@ function processInfo(block) {
     const login = { pid: block.child_pid, name: "login", argv0: null, cwd: block.cwd, user: process.env.USER ?? "", user_id: process.getuid?.() ?? 0 };
     return { child: login, foreground: login, home: FAKE_HOME, last_exit: null };
   }
+  const program = block.restored ? null : execedProgram(block.command);
+  const seen = block.restored ? runningProgram(block.child_pid) : { name: basename(program), argv0: program, path: program, invoked_path: program };
   const proc = block.child_pid && !exit
-    ? { pid: block.child_pid, name: basename(execedProgram(block.command)), argv0: execedProgram(block.command), path: execedProgram(block.command), invoked_path: execedProgram(block.command), cwd: block.cwd, user: process.env.USER ?? "", user_id: process.getuid?.() ?? 0 }
+    ? { pid: block.child_pid, ...seen, cwd: block.cwd, user: process.env.USER ?? "", user_id: process.getuid?.() ?? 0 }
     : null;
   if (exit) return { home: FAKE_HOME, last_exit: exit };
   return proc ? { child: proc, foreground: proc, home: FAKE_HOME, last_exit: null } : { home: FAKE_HOME, last_exit: null };
@@ -876,8 +926,12 @@ function fakeOp(op, raw) {
         return {};
       case "restartServer":
         for (const block of Object.values(state.blocks)) {
+          const record = resumeRecord(block);
           killProcess(block);
           forgetRelay(state, block);
+          block.command = args.trust === true && record ? record.argv : ["/bin/sh"];
+          block.restored = true;
+          block.fresh_env = freshEnv(args.env ?? {});
           startProcess(state, block);
         }
         state.server = "running";

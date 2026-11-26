@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
+import "./rexResumeArgv.js";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   existsSync,
+  fstatSync,
   linkSync,
   lstatSync,
   mkdirSync,
@@ -13,6 +15,7 @@ import {
   realpathSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
@@ -205,10 +208,12 @@ import {
   waitForPaneEstablished,
   windowLayout,
 } from "./terminal.js";
-import { commandArgv, envFromFlags, rexClose, rexCannotTell, rexCreatePane, rexHideBlock, rexLayoutProject, rexPeekBlock, rexProjectLead, rexRefuseQuickExit, rexShowBlock, rexShownAs, rexVisibility } from "./terminal/rex.js";
+import { commandArgv, envFromFlags, REX_LAUNCH_VERB, rexClose, rexCannotTell, rexCreatePane, rexHideBlock, rexLayoutProject, rexPeekBlock, rexProjectLead, rexRefuseQuickExit, rexShowBlock, rexShownAs, rexVisibility } from "./terminal/rex.js";
 import { collectCrew, crewStoreProblem } from "./crew.js";
 import { resumeWorker, validateResumeWorker } from "./agentResume.js";
 import { markWorkerLost } from "./workerRecovery.js";
+import { rexCallerBlock } from "./rexCli.js";
+import { REX_RESUME_PID_ENV, REX_RESUME_RULE_NAME, REX_RESUME_VERB, rexLaunchReport, rexResumeLine, rexResumeTrustRule } from "./rexResume.js";
 import type { AgentRow } from "./agentRecords.js";
 import { describeVisibility, formatLocal, processCounts } from "./dashboard.js";
 import {
@@ -343,6 +348,9 @@ Usage:
   hive setup --attach <mode> auto|raw|control: whether tmux attaches carry -CC
   hive setup --terminal <t>  tmux|rex: the terminal a new lead starts in;
                              HIVE_TERMINAL and a project's hive.yml win over it
+  hive setup --rex-resume    print the Rex init.lua trust rule that lets Rex
+                             resume hive leads and workers after a restart;
+                             writes nothing
   hive doctor [--strict] [--verbose]
                              check the environment and clean up stale state;
                              --strict also exits non-zero on warnings that mean
@@ -754,14 +762,14 @@ function leadTerminal(previous: RowPaneIdentity, config: { terminal: Terminal | 
   return resolveTerminalAndWarn(config).terminal;
 }
 
-function rexLeadPane(project: Project, previous: RowPaneIdentity, envFlags: string[], launchCommand: string, codexHomeKey?: string) {
+function rexLeadPane(project: Project, previous: RowPaneIdentity, envFlags: string[], launchCommand: string, codexHomeKey?: string, agentId?: number) {
   if (terminalOfRow(previous) === "rex" && rowOwnership(previous) === "live") {
     return { leadPane: previous.tmux_target, leadWindow: "", createdPane: false, leadSocket: previous.tmux_socket, leadPid: "" };
   }
   try {
     const placed = withWindowClaim(() => rexCreatePane({
       projectId: project.id, projectName: project.name, label: `${project.name}/lead`, cwd: project.path,
-      env: envFromFlags(envFlags), argv: commandArgv(launchCommand), placement: "lead", retainOnExit: false,
+      env: envFromFlags(envFlags), argv: commandArgv(launchCommand), placement: "lead", retainOnExit: false, agentId,
     }));
     rexRefuseQuickExit(placed.target, rexServerOf(placed.socket));
     return { leadPane: placed.target, leadWindow: placed.window, createdPane: true, leadSocket: placed.socket, leadPid: placed.pid };
@@ -950,7 +958,7 @@ async function cmdLead(argv: string[]): Promise<void> {
 
     const launchCommand = leadCommand + promptSuffix;
     const terminal = leadTerminal(previousIdentity, config);
-    const { leadPane, leadWindow, createdPane, leadSocket, leadPid } = terminal === "rex" ? rexLeadPane(project, previousIdentity, envFlags, launchCommand, newCodexHomeKey) : { leadSocket: callerTmuxSocket(), leadPid: "", ...withWindowClaim(() => {
+    const { leadPane, leadWindow, createdPane, leadSocket, leadPid } = terminal === "rex" ? rexLeadPane(project, previousIdentity, envFlags, launchCommand, newCodexHomeKey, leadAgentId) : { leadSocket: callerTmuxSocket(), leadPid: "", ...withWindowClaim(() => {
       let leadPane: string;
       let leadWindow: string;
       let createdPane: boolean;
@@ -2043,6 +2051,34 @@ function cmdPeek(argv: string[]): void {
   if (hit) console.log(rexPeekBlock(hit.project.id, hit.name, hit.target));
 }
 
+function cmdRexLaunch(argv: string[]): void {
+  try {
+    const report = rexLaunchReport(Number(argv[0]), argv[1] ?? "", process.env.OSC7577_TOKEN);
+    if (report) writeSync(1, report);
+  } catch {}
+  process.exit(0);
+}
+
+function cmdRexResume(argv: string[]): void {
+  try {
+    fstatSync(3);
+    writeSync(3, `${rexResumeLine(Number(argv[0]), process.env[REX_RESUME_PID_ENV], rexCallerBlock() ?? undefined)}\n`);
+    process.exit(0);
+  } catch (e) {
+    const message = errorMessage(e);
+    console.error(message.startsWith("hive: not resuming") ? message : `hive: not resuming agent ${argv[0]}: ${message}`);
+    process.exit(1);
+  }
+}
+
+function printRexResumeRule(): void {
+  console.log("Add this to Rex's init.lua so Rex resumes hive leads and workers after a restart");
+  console.log("with their hive identity. hive never edits init.lua. Then run: rex config reload\n");
+  console.log(rexResumeTrustRule());
+  console.log(`\nTo remove it, delete those lines, or add rex.set("resume.trust.${REX_RESUME_RULE_NAME}", false), then rex config reload.`);
+  console.log("Without it, a restored hive block comes back as a shell and hive closes its row.");
+}
+
 const LEAD_PANE_EXITED_HOOK = "pane-exited";
 const LEAD_PANE_EXITED_VERB = "lead-pane-exited";
 const LEAD_HANDOFF_GRACE_VERB = "lead-handoff-grace";
@@ -2552,9 +2588,10 @@ function cmdUpgrade(argv: string[]): void {
 }
 
 function cmdSetup(argv: string[]): void {
-  const parsed = parseArgs(argv, { flags: ["--force"], valued: ["--dir", "--attach", "--auto-attach", "--terminal"] });
-  rejectUnknownFlags("setup", parsed, "--dir, --attach, --auto-attach, --force. Also --terminal tmux|rex");
+  const parsed = parseArgs(argv, { flags: ["--force", "--rex-resume"], valued: ["--dir", "--attach", "--auto-attach", "--terminal"] });
+  rejectUnknownFlags("setup", parsed, "--dir, --attach, --auto-attach, --force. Also --terminal tmux|rex and --rex-resume");
   requireFlagValues("setup", parsed);
+  if (parsed.flags.has("--rex-resume")) return printRexResumeRule();
 
   const dir = parsed.values.has("--dir") ? resolve(parsed.values.get("--dir") ?? "") : dispatcherDir();
   const file = join(dir, "hive");
@@ -4915,6 +4952,8 @@ const COMMANDS = [
   LEAD_HANDOFF_GRACE_VERB,
   LEAD_HANDOFF_START_VERB,
   "lead-handoff",
+  REX_LAUNCH_VERB,
+  REX_RESUME_VERB,
   "pads", "pad", "todos", "todo", "questions", "answer", "backups", "restore", "project", "runbook", "posture", "profile", "kickoff", "statusline",
 ];
 if (!COMMANDS.includes(command)) {
@@ -4929,7 +4968,7 @@ if (!COMMANDS.includes(command)) {
     usage();
   }
 }
-if (command !== "upgrade" && command !== "crew") migrate();
+if (command !== "upgrade" && command !== "crew" && command !== REX_LAUNCH_VERB && command !== REX_RESUME_VERB) migrate();
 
 try {
   switch (command) {
@@ -4953,6 +4992,12 @@ try {
       break;
     case LEAD_PANE_EXITED_VERB:
       cmdLeadPaneExited(rest);
+      break;
+    case REX_LAUNCH_VERB:
+      cmdRexLaunch(rest);
+      break;
+    case REX_RESUME_VERB:
+      cmdRexResume(rest);
       break;
     case "lead-handoff":
       process.exitCode = await cmdLeadHandoff(rest);

@@ -128,6 +128,7 @@ export interface RespawnArgs {
   rex?: {
     projectId: number;
     projectName: string;
+    agentId?: number;
     record: (placed: { target: string; pid: string }) => void;
     orphaned?: (detail: string) => void;
   };
@@ -194,7 +195,7 @@ function rexLeadSpec(rex: RespawnArgs["rex"], cwd: string, env: string[], comman
   if (!rex) throw new Error("a Rex respawn needs the lead's project");
   return {
     projectId: rex.projectId, projectName: rex.projectName, label: `${rex.projectName}/lead`, cwd,
-    env: envFromFlags(env), argv: commandArgv(command), placement: "lead" as const, retainOnExit: false,
+    env: envFromFlags(env), argv: commandArgv(command), placement: "lead" as const, retainOnExit: false, agentId: rex.agentId,
   };
 }
 

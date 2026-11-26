@@ -27,6 +27,7 @@ Commands that parse arguments reject unknown flags. To pass positional text that
 | `hive upgrade --check` | Preview the commands without changing your install or update cache |
 | `hive upgrade --run` | Run a checkout’s pull/install/build/setup recipe, stopping at the first failure |
 | `hive setup` | Pin the `hive` command to the interpreter that built it |
+| `hive setup --rex-resume` | Rex only: print the `init.lua` trust rule that lets Rex resume hive leads and workers after a Rex restart, with their hive identity. It writes nothing. Without the rule a restored hive block comes back as a shell and hive closes its row |
 | `hive doctor` | Check the environment and sweep stale state. It also lists MCP servers using this data dir that started before the store's newest migration, with the pid, start time and parent, and tells you to restart that session. It warns when the tmux server environment carries `NO_COLOR`, which makes `agent_send` refuse and wakes hold (see [tmux settings](tmux.md#what-hive-needs)). It stops nothing |
 | `hive pads` / `hive pad <name>` | List or print a pad; `--export` writes a revision-stamped file, `--edit` opens it, and `--save [file] [--revision <n>]` saves with a revision guard |
 | `hive todos` / `hive todo <id>` | List todos, or print one in full |
