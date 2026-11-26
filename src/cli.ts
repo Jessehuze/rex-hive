@@ -1912,7 +1912,7 @@ async function cmdStart(argv: string[]): Promise<void> {
   if (result.status === "started" && proc.wait_for_port != null) {
     const row = runningCommandRow(project.id, name);
     if (row && isRexTarget(row.tmux_target)) ports = awaitStartedPorts(row, proc.wait_for_port);
-    else console.log(`${name}: ${WAIT_FOR_PORT_ON_TMUX}`);
+    else if (row) console.log(`${name}: ${WAIT_FOR_PORT_ON_TMUX}`);
   }
   if (trusted) console.log(`${name}: ${renderStart(result)}${ports}`);
   if (!trusted || result.status === "failed" || result.status === "refused") process.exitCode = 1;

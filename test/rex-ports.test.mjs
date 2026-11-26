@@ -118,6 +118,52 @@ describe("Rex process ports", () => {
     assert.ok(portsCallsSince(before) >= 2, "true still waits for a port to appear");
   });
 
+  it("wait_for_port true timeout reads 'no port listening' with no double negative", async () => {
+    const dir = freshProject("rex-any-timeout");
+    const project = await startLead(dir);
+    await seedPortsYml(project.id, dir, { web: { command: "sleep 600", wait_for_port: true } });
+    const result = await cli(["start", "web"], dir, { HIVE_WAIT_FOR_PORT_TIMEOUT_MS: "1000" });
+    assert.match(result.stdout, /^web: started; no port listening after 1s$/m, result.stdout + result.stderr);
+  });
+
+  it("wait_for_port stops early and says the process exited when it exits after the quick-exit window", async () => {
+    const dir = freshProject("rex-port-exit");
+    const project = await startLead(dir);
+    await seedPortsYml(project.id, dir, { web: { command: "sleep 2", wait_for_port: 3000 } });
+    const startedAt = Date.now();
+    const result = await cli(["start", "web"], dir, { HIVE_WAIT_FOR_PORT_TIMEOUT_MS: "30000" });
+    assert.match(result.stdout, /^web: started; exited before port 3000 was listening$/m, result.stdout + result.stderr);
+    assert.ok(Date.now() - startedAt < 15_000, `waited ${Date.now() - startedAt}ms for a process that had exited`);
+  });
+
+  it("wait_for_port stops early when Rex reports ports unsupported", async () => {
+    const dir = freshProject("rex-port-unsupported");
+    const project = await startLead(dir);
+    await seedPortsYml(project.id, dir, { web: { command: "sleep 600", wait_for_port: 3000 } });
+    const started = cli(["start", "web"], dir, { HIVE_WAIT_FOR_PORT_TIMEOUT_MS: "30000" });
+    const block = await blockOf(project.id, "web");
+    fakeRexDo(dirs.tmp, "setPorts", { block_id: block, status: "unsupported" });
+    const startedAt = Date.now();
+    const result = await started;
+    assert.match(result.stdout, /^web: started; Rex cannot list ports, so port 3000 was not waited for$/m, result.stdout + result.stderr);
+    assert.ok(Date.now() - startedAt < 15_000, "unsupported does not poll to the timeout");
+  });
+
+  it("a failed session view skips the ports read for that row", async () => {
+    const dir = freshProject("rex-view-fail");
+    const project = await startLead(dir);
+    await seedPortsYml(project.id, dir, { web: { command: "sleep 600" } });
+    assert.equal((await cli(["start", "web"], dir)).code, 0);
+    const before = realCalls().length;
+    process.env.FAKE_REX_FAIL_ON = "session.view";
+    try {
+      snapshotProcesses(project.id);
+    } finally {
+      delete process.env.FAKE_REX_FAIL_ON;
+    }
+    assert.equal(portsCallsSince(before), 0, "no ports call after the view failed");
+  });
+
   it("dashboard shows a process's listening ports on Rex", async () => {
     const dir = freshProject("rex-dash-ports");
     const project = await startLead(dir);

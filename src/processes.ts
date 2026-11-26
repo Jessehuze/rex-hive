@@ -62,9 +62,13 @@ function waitForPortTimeoutMs(): number {
 
 export function awaitStartedPorts(row: Pick<StoppableRow, "tmux_target" | "tmux_socket">, want: number | true): string {
   const timeoutMs = waitForPortTimeoutMs();
-  const ports = rexAwaitPorts(row.tmux_target, want, timeoutMs, rowServer(row.tmux_socket, row.tmux_target) ?? undefined);
-  if (ports) return ` (ports ${portNumbers(ports).join(", ")})`;
-  return `; ${want === true ? "no port" : `port ${want}`} not listening after ${Math.round(timeoutMs / 1000)}s`;
+  const wait = rexAwaitPorts(row.tmux_target, want, timeoutMs, rowServer(row.tmux_socket, row.tmux_target) ?? undefined);
+  const what = want === true ? "any port" : `port ${want}`;
+  if ("ports" in wait) return ` (ports ${portNumbers(wait.ports).join(", ")})`;
+  if (wait.stopped === "exited") return `; exited before ${what} was listening`;
+  if (wait.stopped === "unsupported") return `; Rex cannot list ports, so ${what} was not waited for`;
+  const after = `after ${Math.round(timeoutMs / 1000)}s`;
+  return want === true ? `; no port listening ${after}` : `; port ${want} not listening ${after}`;
 }
 
 export const COMMAND_KIND = "command";
