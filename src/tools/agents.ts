@@ -489,6 +489,10 @@ function nextWorkerName(projectId: number): string {
 
 const PANE_READY_MS = Number(process.env.HIVE_SPAWN_READY_MS ?? 45_000);
 
+export const HIDDEN_WORKERS_NEED_REX =
+  "This project's hive.yml sets workers: hidden, which needs terminal: rex; under tmux it is ignored, so this worker started shown.";
+const hiddenWorkersWarned = new Set<number>();
+
 function capturePaneQuietly(target: string): string {
   try {
     return capturePane(target, 15);
@@ -910,10 +914,13 @@ export function registerAgents(server: McpServer): void {
           const existingNote = typeof receipt.note === "string" ? receipt.note : "";
           receipt.note = existingNote ? `${existingNote} ${omittedTodoWarning}` : omittedTodoWarning;
         }
-        if (placementNote) {
+        const hiddenNote = spawned.hidden === "tmux" && !hiddenWorkersWarned.has(project.id) ? HIDDEN_WORKERS_NEED_REX : undefined;
+        for (const extra of [spawned.hidden === "rex" ? undefined : placementNote, hiddenNote]) {
+          if (!extra) continue;
           const existingNote = typeof receipt.note === "string" ? receipt.note : "";
-          receipt.note = existingNote ? `${existingNote} ${placementNote}` : placementNote;
+          receipt.note = existingNote ? `${existingNote} ${extra}` : extra;
         }
+        if (hiddenNote) hiddenWorkersWarned.add(project.id);
         return receipt;
       }),
   );

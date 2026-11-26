@@ -1269,32 +1269,82 @@ export const rexProjectLead = (projectId: number): { tmux_target: string; tmux_s
 
 export const rexCannotTell = (name: string): string => `${name}: Rex could not be probed, so hive cannot tell where its block is`;
 
-function rexMinimized(target: string, server?: string): boolean | null {
+interface RexSpot {
+  floating: boolean;
+  minimized: boolean;
+  ownTab: boolean;
+  layer: string;
+  session: string;
+  server: string;
+}
+
+function rexSpot(target: string, leadTarget: string, server?: string): RexSpot | null {
   try {
     const resolved = requireServer(target, server);
-    const mine = placeOf(sessionView(resolved, rexSessionOf(resolved, target)), target);
-    return mine ? mine.floating && mine.minimized : null;
+    const session = rexSessionOf(resolved, target);
+    const view = sessionView(resolved, session);
+    const mine = placeOf(view, target);
+    if (!mine) return null;
+    const lead = placeOf(view, leadTarget);
+    return {
+      floating: mine.floating, minimized: mine.floating && mine.minimized, ownTab: !lead || lead.window !== mine.window,
+      layer: mine.layer, session, server: resolved,
+    };
   } catch {
     return null;
   }
 }
 
-export function rexHideProcess(projectId: number, name: string, target: string): string {
+export type RexShownAs = "split" | "window";
+export const rexShownAsKey = (target: string): string => `terminal:rex:shown-as:${target}`;
+
+export function rexRememberShownAs(projectId: number, target: string, placement: RexShownAs): void {
+  writeKv(projectId, rexShownAsKey(target), placement);
+}
+
+export function rexForgetShownAs(projectId: number, target: string): void {
+  if (store === null) return;
+  guarded(() => void sql().prepare("DELETE FROM kv WHERE project_id = ? AND key = ?").run(projectId, rexShownAsKey(target)), undefined);
+}
+
+export function rexShownAs(projectId: number, target: string): RexShownAs | null {
+  if (store === null) return null;
+  const row = guarded(
+    () => sql().prepare("SELECT value FROM kv WHERE project_id = ? AND key = ?").get(projectId, rexShownAsKey(target)) as { value: string } | undefined,
+    undefined,
+  );
+  return row?.value === "split" || row?.value === "window" ? row.value : null;
+}
+
+const leadServer = (lead: ProjectBlockRow): string | undefined => rowServer(lead.tmux_socket, lead.tmux_target) ?? undefined;
+
+export function rexHideBlock(projectId: number, name: string, target: string, remember = false): string {
   const lead = runningLeadBlock(projectId);
   if (!lead) return `${name}: this project has no lead block to float it beside; run hive first`;
-  const minimized = rexMinimized(target, rowServer(lead.tmux_socket, lead.tmux_target) ?? undefined);
-  if (minimized === null) return rexCannotTell(name);
-  if (minimized) return `${name}: already hidden`;
-  rexFloatHidden(target, lead.tmux_target, rowServer(lead.tmux_socket, lead.tmux_target) ?? undefined);
+  const spot = rexSpot(target, lead.tmux_target, leadServer(lead));
+  if (spot === null) return rexCannotTell(name);
+  if (spot.minimized) return `${name}: already hidden`;
+  if (remember && !spot.floating) rexRememberShownAs(projectId, target, spot.ownTab ? "window" : "split");
+  rexFloatHidden(target, lead.tmux_target, leadServer(lead));
   return `${name}: hidden`;
 }
 
-export function rexShowProcess(projectId: number, name: string, target: string, placement: "split" | "window", windowLabel: string): string {
+export function rexShowBlock(projectId: number, name: string, target: string, placement: RexShownAs, windowLabel: string): string {
   const lead = runningLeadBlock(projectId);
   if (!lead) return `${name}: this project has no lead block to show it beside; run hive first`;
-  const where = rexVisibility(target, lead.tmux_target, rowServer(lead.tmux_socket, lead.tmux_target) ?? undefined);
+  const where = rexVisibility(target, lead.tmux_target, leadServer(lead));
   if (where === null) return rexCannotTell(name);
   if (where !== "hidden") return `${name}: already shown`;
-  rexUnfloat(target, lead.tmux_target, placement, windowLabel, rowServer(lead.tmux_socket, lead.tmux_target) ?? undefined);
+  rexUnfloat(target, lead.tmux_target, placement, windowLabel, leadServer(lead));
   return `${name}: shown`;
+}
+
+export function rexPeekBlock(projectId: number, name: string, target: string): string {
+  const lead = runningLeadBlock(projectId);
+  if (!lead) return `${name}: this project has no lead block to peek over; run hive first`;
+  const spot = rexSpot(target, lead.tmux_target, leadServer(lead));
+  if (spot === null) return rexCannotTell(name);
+  if (!spot.floating) return `${name}: not hidden, so there is nothing to peek at`;
+  rexApi(spot.server, "session.set_layer_state", { session_id: spot.session, layer_id: spot.layer, state: "normal", focus: true });
+  return `${name}: peeking over the lead; hive hide ${name} minimizes it again`;
 }
