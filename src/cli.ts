@@ -733,13 +733,27 @@ function reportMigrationResult(result: ReturnType<typeof migrateLegacyConfig>): 
 }
 
 function refuseRexLead(config: { terminal: Terminal | null } | null): void {
-  if (resolveTerminal(config).terminal !== "rex") return;
+  const warnings: string[] = [];
+  const { terminal } = resolveTerminal(config, warnings);
+  for (const w of warnings) console.error(`! ${w}`);
+  if (terminal !== "rex") return;
   try {
     startRexLead();
   } catch (e) {
     if (!(e instanceof RexNotImplemented)) throw e;
     console.error(`hive lead: ${e.message}`);
     process.exit(1);
+  }
+}
+
+function unregisteredLeadRoot(path?: string): string | null {
+  try {
+    if (agentProjectPin() != null) return null;
+    const dir = realpathSync(path ?? process.cwd());
+    if (findProjectForDir(dir)) return null;
+    return gitPrimaryRoot(dir) ?? dir;
+  } catch {
+    return null;
   }
 }
 
@@ -750,6 +764,8 @@ async function cmdLead(argv: string[]): Promise<void> {
   const detach = parsed.flags.has("--detach");
   const path = parsed.positional[0];
 
+  const previewRoot = unregisteredLeadRoot(path);
+  if (previewRoot !== null) refuseRexLead(loadProjectYml(previewRoot).config);
   let registrationNotice: string | null = null;
   try {
     const project = resolveProjectForWrite("hive lead", path, (text) => {
@@ -759,7 +775,7 @@ async function cmdLead(argv: string[]): Promise<void> {
     // Only rows running before this invocation began are leftovers, trust prompts included; a later `hive start` is not.
     const leftoverIds = new Set(runningCommandRows(project.id).map((row) => row.id));
     const { config, warnings, sources } = loadProjectYml(project.path);
-    refuseRexLead(config);
+    if (previewRoot !== project.path) refuseRexLead(config);
     if (detach && (!process.stdin.isTTY || !process.stdout.isTTY)) {
       let untrusted: string | undefined;
       if (config?.lead && !isTrusted(project.id, "lead", config.lead, null, {})) untrusted = "lead";
@@ -1150,10 +1166,18 @@ async function cmdQueen(argv: string[]): Promise<void> {
         "inside the data dir; move it away and run hive queen again.",
     );
   }
+  const existingYml = join(home, "hive.yml");
+  const ymlIsFile = existing?.isDirectory() === true && (() => {
+    try {
+      return lstatSync(existingYml).isFile();
+    } catch {
+      return false;
+    }
+  })();
+  refuseRexLead(ymlIsFile ? loadProjectYml(home).config : null);
   mkdirSync(home, { recursive: true });
   publishQueenYml(home);
   const queen = addProject(home, "queen");
-  refuseRexLead(loadProjectYml(home).config);
   generateQueenDashboardNow();
   if (!parsed.flags.has("--no-dashboard")) maybeOpenQueenDashboard(queen);
   await cmdLead([home, ...parsed.flags]);
@@ -3078,6 +3102,13 @@ function reportStalledWorkers(projectId: number): void {
 function reportEffectiveConfig(loaded: ResolvedHiveConfig): void {
   const config = loaded.config ?? BUILT_IN_PROJECT_YML;
   for (const key of PROJECT_YML_KEYS) {
+    if (key === "terminal") {
+      const terminalWarnings: string[] = [];
+      const resolved = resolveTerminal(config, terminalWarnings);
+      for (const w of terminalWarnings) warn("config terminal", w);
+      info("config terminal", `${JSON.stringify(resolved.terminal)} (source: ${resolved.source})`);
+      continue;
+    }
     info(`config ${key}`, `${JSON.stringify(config[key])} (source: ${loaded.sources[key] ?? "built-in"})`);
   }
   const varKeys = new Set(Object.keys(config.vars));

@@ -101,33 +101,85 @@ describe("terminal setting", () => {
     assert.deepEqual(resolveTerminal(config), { terminal: "tmux", source: "default" });
   });
 
+  it("an unknown HIVE_TERMINAL warns naming HIVE_TERMINAL and falls through to hive.yml", async () => {
+    const { loadProjectYml, resolveTerminal } = await dist();
+    const config = loadProjectYml(freshProject("env-unknown", "terminal: rex\n")).config;
+    for (const value of ["TMUX", "screen"]) {
+      const warnings = [];
+      const resolved = withEnv({ HIVE_TERMINAL: value }, () => resolveTerminal(config, warnings));
+      assert.deepEqual(resolved, { terminal: "rex", source: "project" });
+      assert.deepEqual(warnings, [`HIVE_TERMINAL: terminal must be "tmux" or "rex"; ignoring "${value}".`]);
+    }
+    const quiet = [];
+    withEnv({ HIVE_TERMINAL: "tmux" }, () => resolveTerminal(config, quiet));
+    assert.deepEqual(quiet, []);
+  });
+
+  it("hive lead names an unknown HIVE_TERMINAL before refusing for the hive.yml rex", async () => {
+    const dir = freshProject("lead-env-unknown", "terminal: rex\n");
+    const result = await runCli(["lead", dir, "--detach"], {
+      cwd: dir,
+      dataDir: dirs.dataDir,
+      tmp: dirs.tmp,
+      env: { HIVE_TERMINAL: "TMUX" },
+    });
+    assert.equal(result.code, 1, result.stdout + result.stderr);
+    const warning = result.stderr.indexOf('! HIVE_TERMINAL: terminal must be "tmux" or "rex"; ignoring "TMUX".');
+    assert.ok(warning >= 0, result.stderr);
+    assert.ok(result.stderr.indexOf(REFUSAL) > warning, result.stderr);
+  });
+
+  it("doctor's config terminal row shows the resolved terminal and its source", { skip: hasTmux ? false : "tmux is not installed" }, async () => {
+    const doctor = async ({ global, env = {} }) => {
+      const own = scratchDirs();
+      const opts = { cwd: own.projectDir, dataDir: own.dataDir, tmp: own.tmp };
+      assert.equal((await runCli(["init", "--no-profile"], opts)).code, 0);
+      if (global !== undefined) writeFileSync(join(own.dataDir, "hive.yml"), global);
+      return (await runCli(["doctor"], { ...opts, env: { HIVE_NO_UPDATE_CHECK: "1", ...env } })).stdout;
+    };
+    assert.match(await doctor({ global: "terminal: rex\n" }), /info {2}config terminal: "rex" \(source: global\)/);
+    assert.match(await doctor({ env: { HIVE_TERMINAL: "rex" } }), /info {2}config terminal: "rex" \(source: env\)/);
+    assert.match(await doctor({}), /info {2}config terminal: "tmux" \(source: default\)/);
+    assert.match(
+      await doctor({ env: { HIVE_TERMINAL: "TMUX" } }),
+      /warn {2}config terminal: HIVE_TERMINAL: terminal must be "tmux" or "rex"; ignoring "TMUX"\./,
+    );
+  });
+
   it("workers and wait_for_port parse their valid values and warn on anything else in placement style", async () => {
     const { loadProjectYml } = await dist();
     const good = freshProject(
       "workers-good",
       "workers: hidden\nprocesses:\n  web:\n    command: npm start\n    wait_for_port: 3000\n" +
-        "  api:\n    command: npm run api\n    wait_for_port: true\n  plain: make run\n",
+        "  api:\n    command: npm run api\n    wait_for_port: true\n  plain: make run\n" +
+        "  top:\n    command: npm run top\n    wait_for_port: 65535\n",
     );
     const parsed = loadProjectYml(good);
     assert.deepEqual(parsed.warnings, []);
     assert.equal(parsed.config.workers, "hidden");
     assert.equal(parsed.config.processes.web.wait_for_port, 3000);
     assert.equal(parsed.config.processes.api.wait_for_port, true);
+    assert.equal(parsed.config.processes.top.wait_for_port, 65535);
     assert.equal(parsed.config.processes.plain.wait_for_port ?? null, null);
 
     const bad = freshProject(
       "workers-bad",
       "workers: invisible\nprocesses:\n  web:\n    command: npm start\n    wait_for_port: 0\n" +
-        "  api:\n    command: npm run api\n    wait_for_port: false\n",
+        "  api:\n    command: npm run api\n    wait_for_port: false\n" +
+        "  big:\n    command: npm run big\n    wait_for_port: 65536\n",
     );
     const rejected = loadProjectYml(bad);
     assert.equal(rejected.config.workers, null);
     assert.equal(rejected.config.processes.web.wait_for_port ?? null, null);
     assert.equal(rejected.config.processes.api.wait_for_port ?? null, null);
+    assert.equal(rejected.config.processes.big.wait_for_port ?? null, null);
     const text = rejected.warnings.join("\n");
     assert.match(text, /workers must be "shown" or "hidden"; ignoring "invisible"\./);
-    assert.match(text, /Process "web": wait_for_port must be a positive integer or true; ignoring "0"\./);
-    assert.match(text, /Process "api": wait_for_port must be a positive integer or true; ignoring "false"\./);
+    const portWarning = (name, value) =>
+      `Process "${name}": wait_for_port must be a port from 1 through 65535, or true; ignoring "${value}".`;
+    assert.ok(text.includes(portWarning("web", "0")), text);
+    assert.ok(text.includes(portWarning("api", "false")), text);
+    assert.ok(text.includes(portWarning("big", "65536")), text);
   });
 
   it("terminalOfRow reads rex from a block: target or a rex: socket and tmux from anything else", async () => {
@@ -164,9 +216,26 @@ describe("terminal setting", () => {
       "SELECT COUNT(*) AS n FROM agents a JOIN projects p ON p.id = a.project_id WHERE p.path = ? AND a.kind = 'lead'",
     ).get(dir);
     assert.equal(leads.n, 0, "a refused lead must not leave a lead row behind");
+    const registered = db.prepare("SELECT COUNT(*) AS n FROM projects WHERE path = ?").get(dir);
+    assert.equal(registered.n, 0, "a refused lead in an unregistered dir must not register it");
   });
 
-  it("hive queen under HIVE_TERMINAL=rex refuses with the same way back before its dashboard or lead exists", async () => {
+  it("hive lead in an already registered project with terminal rex refuses and records no lead", async () => {
+    const { db } = await dist();
+    const dir = freshProject("lead-rex-registered");
+    const opts = { cwd: dir, dataDir: dirs.dataDir, tmp: dirs.tmp };
+    assert.equal((await runCli(["init", "--no-profile"], opts)).code, 0);
+    writeFileSync(join(dir, "hive.yml"), "terminal: rex\n");
+    const result = await runCli(["lead", dir, "--detach"], opts);
+    assert.equal(result.code, 1, result.stdout + result.stderr);
+    assert.ok(result.stderr.includes(REFUSAL), result.stderr);
+    const leads = db.prepare(
+      "SELECT COUNT(*) AS n FROM agents a JOIN projects p ON p.id = a.project_id WHERE p.path = ? AND a.kind = 'lead'",
+    ).get(dir);
+    assert.equal(leads.n, 0);
+  });
+
+  it("hive queen under HIVE_TERMINAL=rex refuses with the same way back before creating anything", async () => {
     const own = scratchDirs();
     const result = await runCli(["queen", "--no-dashboard"], {
       cwd: own.projectDir,
@@ -179,9 +248,11 @@ describe("terminal setting", () => {
     const { default: Database } = await import("better-sqlite3");
     const store = new Database(join(own.dataDir, "hive.db"), { readonly: true });
     const leads = store.prepare("SELECT COUNT(*) AS n FROM agents WHERE kind = 'lead'").get().n;
+    const projects = store.prepare("SELECT COUNT(*) AS n FROM projects").get().n;
     store.close();
     assert.equal(leads, 0);
-    assert.equal(existsSync(join(own.dataDir, "queen", "dashboard.html")), false);
+    assert.equal(projects, 0, "a refused queen must not register its project");
+    assert.equal(existsSync(join(own.dataDir, "queen")), false, "a refused queen must not create its home");
   });
 
   it("rexInUse reads the kv flag and the cwd project's terminal and never runs rex", async () => {
@@ -272,7 +343,7 @@ describe("terminal setting against a live tmux lead", () => {
     const mcp = new McpClient({
       cwd: dir,
       dataDir: dirs.dataDir,
-      env: { HIVE_AGENT_ID: lead.actor_id, HIVE_SPAWN_READY_MS: "500" },
+      env: { HIVE_AGENT_ID: lead.actor_id, HIVE_SPAWN_READY_MS: "500", HIVE_TERMINAL: "rex" },
     });
     clients.push(mcp);
     await mcp.start();

@@ -218,8 +218,8 @@ function parseProcesses(value: unknown, path: string, warnings: string[]): Recor
     let waitForPort: number | true | null = null;
     if (item.wait_for_port != null) {
       const port = item.wait_for_port;
-      if (port === true || (typeof port === "number" && Number.isInteger(port) && port > 0)) waitForPort = port;
-      else warnings.push(`${path}: Process "${name}": wait_for_port must be a positive integer or true; ignoring "${String(port)}".`);
+      if (port === true || (typeof port === "number" && Number.isInteger(port) && port >= 1 && port <= 65535)) waitForPort = port;
+      else warnings.push(`${path}: Process "${name}": wait_for_port must be a port from 1 through 65535, or true; ignoring "${String(port)}".`);
     }
     const env: Record<string, string> = {};
     if (isMapping(item.env)) {

@@ -163,9 +163,13 @@ export const rexServerOf = (socket: string): string => socket.replace(/^rex:/, "
 
 export type TerminalSource = "env" | "project" | "global" | "default";
 
-export function resolveTerminal(project: { terminal: Terminal | null } | null): { terminal: Terminal; source: TerminalSource } {
+export function resolveTerminal(
+  project: { terminal: Terminal | null } | null,
+  warnings?: string[],
+): { terminal: Terminal; source: TerminalSource } {
   const env = process.env.HIVE_TERMINAL;
   if (isTerminal(env)) return { terminal: env, source: "env" };
+  if (env) warnings?.push(`HIVE_TERMINAL: terminal must be "tmux" or "rex"; ignoring "${env}".`);
   if (project?.terminal) return { terminal: project.terminal, source: "project" };
   const global = readGlobalConfig().root?.terminal;
   if (isTerminal(global)) return { terminal: global, source: "global" };

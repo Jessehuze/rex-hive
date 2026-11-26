@@ -61,7 +61,7 @@ processes:
     command: npx tsc --watch --preserveWatchOutput
     dir: ./packages/api       # relative to the project root
     auto_start: false         # start manually with: hive start typecheck
-    wait_for_port: 3000       # optional; a positive port, or true for any port
+    wait_for_port: 3000       # optional; a port from 1 through 65535, or true for any port
     visible: false            # optional; default true. true follows placement: above, the
                               # same as a worker (split beside the lead, or its own window).
                               # false tiles it as a pane in one shared `<project>/processes`
