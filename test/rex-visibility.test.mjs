@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 
@@ -143,7 +143,14 @@ describe("worker visibility on tmux", () => {
     const mcp = new McpClient({ cwd: dir, dataDir: plainData, env: withClaude({ HIVE_SPAWN_READY_MS: "300" }) });
     await mcp.start();
     try {
-      await assert.rejects(mcp.call("agent_spawn", { name: "t-fails", command: "/usr/bin/false", placement: "window" }));
+      const briefs = join(plainData, "briefs");
+      rmSync(briefs, { recursive: true, force: true });
+      writeFileSync(briefs, "a file where the briefs directory goes, so the brief write fails inside launchAgent\n");
+      await assert.rejects(
+        mcp.call("agent_spawn", { name: "t-fails", command: fakeClaude("sleep 600"), placement: "window" }),
+        /EEXIST|ENOTDIR|not a directory|file already exists/,
+      );
+      rmSync(briefs);
       const first = await mcp.call("agent_spawn", { name: "t-one", command: fakeClaude("sleep 600"), placement: "window" });
       const second = await mcp.call("agent_spawn", { name: "t-two", command: fakeClaude("sleep 600"), placement: "window" });
       assert.match(first.tmux_target, /^%\d+$/);
