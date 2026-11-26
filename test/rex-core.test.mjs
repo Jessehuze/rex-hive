@@ -19,7 +19,7 @@ await import("../dist/rexInUse.js");
 const terminal = await import("../dist/terminal.js");
 const { janitor } = await import("../dist/scheduler.js");
 const { rexApi } = await import("../dist/rexCli.js");
-const { REX_CAPTURE_BYTES_PER_LINE, rexStop } = await import("../dist/terminal/rex.js");
+const { REX_CAPTURE_BYTES_PER_LINE, rexStopProcess } = await import("../dist/terminal/rex.js");
 
 after(() => {
   fake.cleanup();
@@ -199,18 +199,18 @@ describe("Rex core pane operations", () => {
     assert.ok(fake.state().closed.includes(b.block));
   });
 
-  it("rexStop closes a block whose program exits on ctrl+c without waiting out the timeout", () => {
+  it("rexStopProcess closes a block whose program exits on ctrl+c without waiting out the timeout", () => {
     const b = newBlock("stop-exits");
     const started = Date.now();
-    rexStop(b.block, 5000);
+    rexStopProcess(b.block, 5000);
     assert.ok(Date.now() - started < 4000, "it returned once the program exited");
     assert.ok(fake.state().closed.includes(b.block));
   });
 
-  it("rexStop closes a block that ignores ctrl+c once the timeout passes", () => {
+  it("rexStopProcess closes a block that ignores ctrl+c once the timeout passes", () => {
     const b = newBlock("stop-ignores", ["/bin/sh", "-c", "trap '' INT; while :; do sleep 1; done"]);
     const started = Date.now();
-    rexStop(b.block, 600);
+    rexStopProcess(b.block, 600);
     assert.ok(Date.now() - started >= 600, "it waited the timeout out");
     assert.ok(fake.state().closed.includes(b.block));
   });

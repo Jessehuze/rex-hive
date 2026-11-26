@@ -22,20 +22,6 @@ import {
   type WindowLayout,
 } from "../tmux.js";
 
-export const rexRefusal = (operation: string): string =>
-  `${operation} is not available under the Rex terminal in this build; restart the lead with HIVE_TERMINAL=tmux to use it`;
-
-export class RexNotImplemented extends Error {
-  constructor(readonly operation: string) {
-    super(rexRefusal(operation));
-    this.name = "RexNotImplemented";
-  }
-}
-
-const refuse = (operation: string): never => {
-  throw new RexNotImplemented(operation);
-};
-
 
 export interface RexStore {
   inTransaction?: boolean;
@@ -608,7 +594,6 @@ export function rexStopProcess(target: string, timeoutMs: number, server?: strin
   return { exited, gone: rexProbe(target, resolved).live === false };
 }
 
-export const rexStop = (target: string, timeoutMs: number, server?: string): void => void rexStopProcess(target, timeoutMs, server);
 
 export function rexFinalScreen(target: string, lines: number, server?: string): string {
   return rexCapture(target, Math.max(lines * 10, 200), false, server).split("\n").filter((row) => row.trim() !== "").slice(-lines).join("\n");

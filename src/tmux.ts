@@ -1485,7 +1485,7 @@ export function classifyCodexInputBox(rows: string[], promptRowIndex: number, fo
   return { state: text === "" ? "empty" : dim ? "ghost" : "pending", text };
 }
 
-export function codexInputBoxStateFromRaw(raw: string, _title: string | null = null): InputBoxState | null {
+export function codexInputBoxStateFromRaw(raw: string): InputBoxState | null {
   const rows = raw.split("\n");
   const box = findCodexPromptBox(rows);
   return box === null ? null : classifyCodexInputBox(rows, box.prompt, box.footer);

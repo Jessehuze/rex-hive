@@ -441,7 +441,7 @@ export function paneAwaitingChoice(target: string): boolean | null {
 
 export function codexInputBoxState(target: string): InputBoxState | null {
   if (!isRexTarget(target)) return tmuxCodexInputBoxState(target);
-  return rexScreen(() => codexInputBoxStateFromRaw(styledTail(target), null), null);
+  return rexScreen(() => codexInputBoxStateFromRaw(styledTail(target)), null);
 }
 
 export function codexTrailerView(target: string): TrailerView | null {
