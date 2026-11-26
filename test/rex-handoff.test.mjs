@@ -269,6 +269,33 @@ describe("Rex lead handoff", () => {
     fakeRexDo(dirs.tmp, "closeBlock", { block_id: old });
   });
 
+  it("a lead hook from another block is still processed when the row's recorded block runs an unrelated program (reissued, not owned)", async () => {
+    const dir = freshProject("rex-hook-reissued");
+    const project = db.prepare("INSERT INTO projects (name, path) VALUES ('rex-hook-reissued', ?) RETURNING id").get(dir).id;
+    const session = rexApi(process.env.REX_SERVER, "session.create", { label: "rex-hook-reissued" }).session_id;
+    const blockRunning = (label, command) =>
+      rexApi(process.env.REX_SERVER, "session.new_window", {
+        session_id: session, window_label: label, focus: false,
+        layout: { block: { flavor: SHELL, label, options: { shell: "none", login: false, command } } },
+      }).block_ids[0];
+    const stale = blockRunning("rex-hook-reissued/stale", ["/bin/sleep", "600"]);
+    const fresh = blockRunning("rex-hook-reissued/lead", ["/bin/sleep", "600"]);
+    const lead = db
+      .prepare(
+        `INSERT INTO agents (project_id, actor_id, name, kind, tmux_target, tmux_socket, pane_pid, command, cwd, status)
+         VALUES (?, 'lead:reissued', 'lead', 'lead', ?, ?, ?, 'claude', ?, 'running') RETURNING *`,
+      )
+      .get(project, stale, `rex:${process.env.REX_SERVER}`, String(fake.state().blocks[stale].child_pid), dir);
+    const { rowOwnership } = await import("../dist/terminal.js");
+    assert.equal(rowOwnership(lead), "reissued", "the row's block is alive but not the row's program");
+    const logs = () => db.prepare("SELECT COUNT(*) AS n FROM agent_state_log WHERE actor_id = 'lead:reissued'").get().n;
+    const before = logs();
+    await hook("lead:reissued", "prompt", payload("lead-claude-prompt.json", { session_id: SESSION, transcript_path: join(dir, "t.jsonl") }), { REX_BLOCK: fresh });
+    assert.equal(logs(), before + 1, "the hook was accepted and logged");
+    assert.equal(db.prepare("SELECT state FROM lead_turn_state WHERE agent_id = ?").get(lead.id)?.state, "working", "and the lead's turn state took it");
+    for (const block of [stale, fresh]) fakeRexDo(dirs.tmp, "closeBlock", { block_id: block });
+  });
+
   it("a move_block that fails closes the new block, fails the handoff, and leaves the lead row and old block as they were", async () => {
     const ctx = await rexLead("rex-handoff-move-fails");
     const before = { ...blocksBefore(), newBlocks: apiCalls().filter((c) => c.method === "session.new_block").length };

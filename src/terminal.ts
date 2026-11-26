@@ -9,7 +9,6 @@ import {
   envFromFlags,
   rexOwnership,
   rexRespawn,
-  rowServer,
   rexProbe,
   rexRowProbe,
   rexSendKey,
@@ -182,11 +181,10 @@ export function respawnPane({ target, cwd, env, command, rex }: RespawnArgs): { 
   return { target };
 }
 
-export function callerIsOtherLiveBlock(target: string, socket: string): boolean {
+export function callerIsOtherOwnedBlock(row: RowPaneIdentity & { command: string }): boolean {
   const caller = rexCallerBlock();
-  if (!caller || !isRexTarget(target) || caller === target) return false;
-  const probe = rexProbe(target, rowServer(socket, target) ?? undefined);
-  return probe.live === true && !probe.exited;
+  if (!caller || !isRexTarget(row.tmux_target) || caller === row.tmux_target) return false;
+  return rexOwnership(row) === "live";
 }
 
 function rexLeadSpec(rex: RespawnArgs["rex"], cwd: string, env: string[], command: string) {
