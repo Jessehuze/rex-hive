@@ -57,13 +57,21 @@ export interface ProgramStatus {
   msg: string | null;
 }
 
+export interface RexSubagents {
+  count: number;
+  titles: string[];
+}
+
+export const SUBAGENT_TITLES_MAX = 5;
+export const SUBAGENT_TITLE_MAX_CHARS = 80;
+
 export interface RexBlock {
   pid: string;
   argv: string;
   programs: string[];
   exited: boolean;
   status: ProgramStatus | null;
-  subagents: number;
+  subagents: RexSubagents | null;
   window: string;
   session: string;
   label: string;
@@ -297,6 +305,7 @@ interface StatusRecord {
   state?: string;
   kind?: string;
   msg?: string;
+  title?: string;
 }
 
 const programName = (value: string | undefined): string | null => (value ? basename(value.replace(/^-/, "")) : null);
@@ -319,12 +328,20 @@ function readProcess(reply: ProcessReply | null | undefined) {
   };
 }
 
+const isChild = (r: StatusRecord): boolean => r.id !== undefined && r.id !== null && r.id !== "";
+
+function subagentTitle(r: StatusRecord): string {
+  const text = (typeof r.title === "string" && r.title.trim() !== "" ? r.title : String(r.id)).replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").trim();
+  return text.length > SUBAGENT_TITLE_MAX_CHARS ? `${text.slice(0, SUBAGENT_TITLE_MAX_CHARS - 1)}…` : text;
+}
+
 function readStatus(reply: { records?: StatusRecord[] | Record<string, never> } | null | undefined) {
   const records = Array.isArray(reply?.records) ? reply.records : [];
-  const root = records.find((r) => r.id === undefined || r.id === "") ?? null;
+  const root = records.find((r) => !isChild(r)) ?? null;
+  const children = records.filter(isChild);
   return {
     status: root ? { state: root.state ?? "idle", kind: root.kind ?? null, msg: root.msg ?? null } : null,
-    subagents: records.filter((r) => r.id !== undefined && r.id !== "").length,
+    subagents: reply && typeof reply === "object" ? { count: children.length, titles: children.slice(0, SUBAGENT_TITLES_MAX).map(subagentTitle) } : null,
   };
 }
 

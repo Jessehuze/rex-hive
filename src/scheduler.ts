@@ -75,7 +75,7 @@ import { continueLimitedCodexWorkers, observeUsageLimit, usageLimitGate } from "
 import { maybeBackupHourly } from "./backup.js";
 import { renderDashboardForWrite } from "./dashboard.js";
 import { InvalidClockRuleError, nextClockDue, validateClockRule } from "./wakeClock.js";
-import { snapshotProcesses } from "./processes.js";
+import { snapshotProcesses, workerSubagents } from "./processes.js";
 import { loadProjectYml } from "./projectYml.js";
 import { getProjectByPath, listProjects, queenHomeDir } from "./context.js";
 import { collectPortfolio } from "./portfolio.js";
@@ -711,7 +711,7 @@ export function dashboardFileContained(dashboardFile: string, projectPath: strin
   return realpathContained(dashboardFile, projectPath);
 }
 
-function maybeGenerateDashboard(project: { id: number; path: string }): void {
+function maybeGenerateDashboard(project: { id: number; path: string }, snapshot: AliveSnapshot | null | undefined): void {
   try {
 
     if (!loadProjectYml(project.path).config?.dashboard) return;
@@ -723,7 +723,7 @@ function maybeGenerateDashboard(project: { id: number; path: string }): void {
 
     if (!claimDashboardAttempt(project.id)) return;
 
-    const { html, contentHash } = renderDashboardForWrite(project.id, snapshotProcesses(project.id));
+    const { html, contentHash } = renderDashboardForWrite(project.id, snapshotProcesses(project.id), workerSubagents(project.id, snapshot));
     const known = stmt("SELECT last_mark FROM dashboard_meta WHERE project_id = ?").get(project.id) as {
       last_mark: string | null;
     };
@@ -817,12 +817,12 @@ function maybeGenerateQueenDashboard(queen: { id: number; path: string }): void 
   }
 }
 
-function maybeGenerateDashboards(): void {
+function maybeGenerateDashboards(snapshot: AliveSnapshot | null | undefined): void {
   try {
     const queen = queenHome();
     for (const project of listProjects()) {
       if (queen !== null && project.id === queen.id) maybeGenerateQueenDashboard(queen);
-      else maybeGenerateDashboard(project);
+      else maybeGenerateDashboard(project, snapshot);
     }
   } catch {
 
@@ -907,7 +907,7 @@ export async function tick(snapshot?: AliveSnapshot | null): Promise<void> {
 
     isolated("hourly backup", () => maybeBackupHourly(db, dataDir));
 
-    isolated("dashboard generation", maybeGenerateDashboards);
+    isolated("dashboard generation", () => maybeGenerateDashboards(tickSnapshot));
     const now = (stmt("SELECT datetime('now') AS now").get() as { now: string }).now;
 
     await isolated("Codex usage-limit continuation", () => continueLimitedCodexWorkers(Date.now()));
