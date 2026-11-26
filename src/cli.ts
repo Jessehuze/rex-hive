@@ -205,7 +205,7 @@ import {
   waitForPaneEstablished,
   windowLayout,
 } from "./terminal.js";
-import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexHideProcess, rexLayoutProject, rexProjectLead, rexRefuseQuickExit, rexShowProcess, rexVisibility } from "./terminal/rex.js";
+import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexFocus, rexHideProcess, rexLayoutProject, rexProjectLead, rexRefuseQuickExit, rexShowProcess, rexVisibility } from "./terminal/rex.js";
 import { collectCrew, crewStoreProblem } from "./crew.js";
 import { resumeWorker, validateResumeWorker } from "./agentResume.js";
 import { markWorkerLost } from "./workerRecovery.js";
@@ -1136,7 +1136,10 @@ async function cmdLead(argv: string[]): Promise<void> {
       return;
     }
     if (!noDashboard) maybeOpenDashboard(project, !!config?.dashboard);
-    if (terminal === "rex") return console.log(`- lead: Rex block ${leadPane} in tab "${project.name}"`);
+    if (terminal === "rex") {
+      console.log(`- lead: Rex block ${leadPane} in tab "${project.name}"`);
+      return focusRexLead(leadPane, leadSocket);
+    }
     attach(session, project, leadWindow);
   } catch (e) {
 
@@ -1852,12 +1855,38 @@ function openDashboardOnce(project: Project, dashboardFile: string): void {
   }
 }
 
+function focusRexLead(target: string, socket: string): void {
+  let focus: ReturnType<typeof rexFocus>;
+  try {
+    focus = rexFocus(target, rexServerOf(socket));
+  } catch (e) {
+    console.error(`hive: could not focus the lead's Rex block ${target}: ${errorMessage(e)}`);
+    process.exitCode = 1;
+    return;
+  }
+  if (!focus.focused) {
+    console.error(`hive: the lead's Rex block ${target} is not in a tab, so it could not be focused (${focus.hint}).`);
+    process.exitCode = 1;
+  } else if (focus.selected) {
+    console.log(`- focused the lead: ${focus.hint}`);
+  } else {
+    console.log(`- focused the lead, but no Rex app switched to it (Remote Control is off, or no app answered). Open: ${focus.hint}`);
+  }
+}
+
 function cmdAttach(argv: string[]): void {
   const parsed = parseArgs(argv, {});
   rejectUnknownFlags("attach", parsed, "none");
   const path = parsed.positional[0];
   const project = resolveProjectForWrite("hive attach", path);
-  maybeOpenDashboard(project, !!loadProjectYml(project.path).config?.dashboard);
+  const { config } = loadProjectYml(project.path);
+  maybeOpenDashboard(project, !!config?.dashboard);
+  const rexLead = rexProjectLead(project.id);
+  if (rexLead || resolveTerminal(config).terminal === "rex") {
+    if (rexLead && rowOwnership(rexLead) === "live") return focusRexLead(rexLead.tmux_target, rexLead.tmux_socket);
+    console.error(`hive attach: project "${project.name}" has no running Rex lead to focus. Start one with: hive lead ${shellQuote(project.path)}`);
+    process.exit(1);
+  }
   const session = sessionName();
 
   const window = withWindowClaim(() => {
