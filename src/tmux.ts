@@ -1097,7 +1097,7 @@ const BOX_TAIL_ROWS = 8;
 
 const BOX_MAX_ROWS = 24;
 
-function findInputBox(rows: string[]): InputBoxAnchor | null {
+export function findInputBox(rows: string[]): InputBoxAnchor | null {
   const text = rows.map((row) => stripControlBytes(stripSgr(row)).trim());
 
   let end = text.length - 1;
@@ -1160,7 +1160,7 @@ function leadingRunHasForegroundColor(s: string): boolean {
   return foregroundColor && !leadingRunIsFaint(leadingRun);
 }
 
-function classifyInputBox(rows: string[], promptRowIndex: number, boxBottom: number): InputBoxState {
+export function classifyInputBox(rows: string[], promptRowIndex: number, boxBottom: number): InputBoxState {
   const promptRow = rows[promptRowIndex];
   const afterPrompt = promptRow.slice(promptRow.indexOf(PROMPT_GLYPH_NBSP) + PROMPT_GLYPH_NBSP.length);
   const visiblePrefix = /^\[⧉ [^\]]*\] ?/u.exec(stripControlBytes(stripSgr(afterPrompt)))?.[0];
@@ -1231,18 +1231,21 @@ function promptSgrOf(rows: string[], anchor: InputBoxAnchor | null): string {
   return (/^(?:\x1b\[[0-9;]*m)*/.exec(after)?.[0] ?? "").replace(/\x1b/g, "").slice(0, 60);
 }
 
+export function inputBoxSnapshotFromRaw(raw: string): InputBoxSnapshot {
+  const rows = raw.split("\n");
+  const anchor = findInputBox(rows);
+  const box =
+    anchor === null
+      ? null
+      : anchor.prompt === null
+        ? { state: "unknown" as const, text: "" }
+        : classifyInputBox(rows, anchor.prompt, anchor.bottom);
+  return { box, rows: snapshotRows(rows, anchor), promptSgr: promptSgrOf(rows, anchor) };
+}
+
 export function inputBoxSnapshot(target: string): InputBoxSnapshot | null {
   try {
-    const raw = tmux("capture-pane", "-p", "-e", "-t", target, "-S", `-${tailCaptureLines()}`);
-    const rows = raw.split("\n");
-    const anchor = findInputBox(rows);
-    const box =
-      anchor === null
-        ? null
-        : anchor.prompt === null
-          ? { state: "unknown" as const, text: "" }
-          : classifyInputBox(rows, anchor.prompt, anchor.bottom);
-    return { box, rows: snapshotRows(rows, anchor), promptSgr: promptSgrOf(rows, anchor) };
+    return inputBoxSnapshotFromRaw(tmux("capture-pane", "-p", "-e", "-t", target, "-S", `-${tailCaptureLines()}`));
   } catch {
     return null;
   }
@@ -1287,19 +1290,23 @@ export function renderTrailerView(view: TrailerView): string {
   return [...view.above.slice(-TAIL_LINES), boxLine, ...view.below].join("\n");
 }
 
+export function claudeTrailerViewFromRaw(raw: string): TrailerView | null {
+  const rows = raw.split("\n");
+  const anchor = findInputBox(rows);
+  if (anchor === null) return null;
+  const box =
+    anchor.prompt === null ? { state: "unknown" as const, text: "" } : classifyInputBox(rows, anchor.prompt, anchor.bottom);
+  if (box.state === "unknown") return null;
+  return {
+    above: trailerRows(rows, 0, anchor.top, null),
+    box,
+    below: trailerRows(rows, anchor.bottom + 1, rows.length, FOOTER_KEEP),
+  };
+}
+
 export function claudeTrailerView(target: string): TrailerView | null {
   try {
-    const rows = tmux("capture-pane", "-p", "-e", "-t", target, "-S", `-${tailCaptureLines()}`).split("\n");
-    const anchor = findInputBox(rows);
-    if (anchor === null) return null;
-    const box =
-      anchor.prompt === null ? { state: "unknown" as const, text: "" } : classifyInputBox(rows, anchor.prompt, anchor.bottom);
-    if (box.state === "unknown") return null;
-    return {
-      above: trailerRows(rows, 0, anchor.top, null),
-      box,
-      below: trailerRows(rows, anchor.bottom + 1, rows.length, FOOTER_KEEP),
-    };
+    return claudeTrailerViewFromRaw(tmux("capture-pane", "-p", "-e", "-t", target, "-S", `-${tailCaptureLines()}`));
   } catch {
     return null;
   }
@@ -1374,11 +1381,14 @@ export function sanitizeEventForDisplay(event: string): string {
 
 export const tailCaptureLines = (): number => TAIL_LINES * 3;
 
+export function paneChoiceCheckFromRaw(raw: string): { awaitingChoice: boolean | null; tail: string } {
+  const tail = tailWindow(raw, tailCaptureLines());
+  return { awaitingChoice: isAwaitingChoiceScreen(tail, raw), tail: sanitizeTail(tail) };
+}
+
 export function paneChoiceCheck(target: string): { awaitingChoice: boolean | null; tail: string } {
   try {
-    const raw = captureRawPane(target, tailCaptureLines());
-    const tail = tailWindow(raw, tailCaptureLines());
-    return { awaitingChoice: isAwaitingChoiceScreen(tail, raw), tail: sanitizeTail(tail) };
+    return paneChoiceCheckFromRaw(captureRawPane(target, tailCaptureLines()));
   } catch {
     return { awaitingChoice: null, tail: "" };
   }
@@ -1410,7 +1420,7 @@ function codexPromptContentStart(promptRow: string): number {
 
 const CODEX_SHORTCUTS_ROW = /^\?\s+for shortcuts/;
 
-function findCodexPromptBox(rows: string[]): { footer: number; prompt: number } | null {
+export function findCodexPromptBox(rows: string[]): { footer: number; prompt: number } | null {
   const text = rows.map((row) => stripControlBytes(stripSgr(row)).trim());
 
   let footer = text.length - 1;
@@ -1457,7 +1467,7 @@ function findCodexPromptBox(rows: string[]): { footer: number; prompt: number } 
 
 const codexInputBoxOnScreen = (screen: string): boolean => findCodexPromptBox(screen.split("\n")) !== null;
 
-function classifyCodexInputBox(rows: string[], promptRowIndex: number, footerRowIndex: number): InputBoxState {
+export function classifyCodexInputBox(rows: string[], promptRowIndex: number, footerRowIndex: number): InputBoxState {
   const promptRow = rows[promptRowIndex];
   const after = promptRow.slice(codexPromptContentStart(promptRow));
   const dim = leadingRunIsFaint(after);
@@ -1475,29 +1485,36 @@ function classifyCodexInputBox(rows: string[], promptRowIndex: number, footerRow
   return { state: text === "" ? "empty" : dim ? "ghost" : "pending", text };
 }
 
+export function codexInputBoxStateFromRaw(raw: string, _title: string | null = null): InputBoxState | null {
+  const rows = raw.split("\n");
+  const box = findCodexPromptBox(rows);
+  return box === null ? null : classifyCodexInputBox(rows, box.prompt, box.footer);
+}
+
 export function codexInputBoxState(target: string): InputBoxState | null {
   try {
-    const raw = tmux("capture-pane", "-p", "-e", "-t", target, "-S", `-${tailCaptureLines()}`);
-    const rows = raw.split("\n");
-    const box = findCodexPromptBox(rows);
-    return box === null ? null : classifyCodexInputBox(rows, box.prompt, box.footer);
+    return codexInputBoxStateFromRaw(tmux("capture-pane", "-p", "-e", "-t", target, "-S", `-${tailCaptureLines()}`));
   } catch {
     return null;
   }
 }
 
+export function codexTrailerViewFromRaw(raw: string): TrailerView | null {
+  const rows = raw.split("\n");
+  const anchor = findCodexPromptBox(rows);
+  if (anchor === null) return null;
+  const box = classifyCodexInputBox(rows, anchor.prompt, anchor.footer);
+  if (box.state === "unknown") return null;
+  return {
+    above: trailerRows(rows, 0, anchor.prompt, null),
+    box,
+    below: trailerRows(rows, anchor.footer, rows.length, FOOTER_KEEP),
+  };
+}
+
 export function codexTrailerView(target: string): TrailerView | null {
   try {
-    const rows = tmux("capture-pane", "-p", "-e", "-t", target, "-S", `-${tailCaptureLines()}`).split("\n");
-    const anchor = findCodexPromptBox(rows);
-    if (anchor === null) return null;
-    const box = classifyCodexInputBox(rows, anchor.prompt, anchor.footer);
-    if (box.state === "unknown") return null;
-    return {
-      above: trailerRows(rows, 0, anchor.prompt, null),
-      box,
-      below: trailerRows(rows, anchor.footer, rows.length, FOOTER_KEEP),
-    };
+    return codexTrailerViewFromRaw(tmux("capture-pane", "-p", "-e", "-t", target, "-S", `-${tailCaptureLines()}`));
   } catch {
     return null;
   }
@@ -1533,14 +1550,18 @@ function codexAwaitingChoiceFromTitleAndScreen(title: string | null, screenTail:
   return codexScreenAwaitingChoice(screenTail);
 }
 
+export function codexPaneChoiceCheckFromRaw(raw: string, title: string | null): { awaitingChoice: boolean | null; tail: string } {
+  const tail = tailWindow(raw, tailCaptureLines());
+  return {
+    awaitingChoice: codexAwaitingChoiceFromTitleAndScreen(title, tail),
+    tail: sanitizeTail(tail),
+  };
+}
+
 export function codexPaneChoiceCheck(target: string): { awaitingChoice: boolean | null; tail: string } {
   try {
     const raw = captureRawPane(target, tailCaptureLines());
-    const tail = tailWindow(raw, tailCaptureLines());
-    return {
-      awaitingChoice: codexAwaitingChoiceFromTitleAndScreen(paneTitle(target), tail),
-      tail: sanitizeTail(tail),
-    };
+    return codexPaneChoiceCheckFromRaw(raw, paneTitle(target));
   } catch {
     return { awaitingChoice: null, tail: "" };
   }

@@ -1,7 +1,8 @@
 import { findProjectForCwd } from "./context.js";
 import { db } from "./db.js";
 import { loadProjectYml } from "./projectYml.js";
-import { resolveTerminal } from "./terminal.js";
+import { registerRexInUse, resolveTerminal } from "./terminal.js";
+import { registerRexStore } from "./terminal/rex.js";
 
 export const REX_IN_USE_KEY = "terminal:rex:in-use";
 
@@ -14,3 +15,6 @@ export function rexInUse(): boolean {
   const config = project ? loadProjectYml(project.path).config : null;
   return resolveTerminal({ terminal: config?.terminal ?? null }).terminal === "rex";
 }
+
+registerRexInUse(rexInUse);
+registerRexStore(db);

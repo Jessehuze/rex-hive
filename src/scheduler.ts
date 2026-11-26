@@ -148,7 +148,7 @@ import {
   rowAliveProbe,
   rowLiveProbe,
   rowOwnership,
-  sendText,
+  sendText, terminalOfRow,
 } from "./terminal.js";
 import {
   appendTeardown,
@@ -546,7 +546,7 @@ export function janitor(snapshot: AliveSnapshot | null = liveTargets()): {
   // recording that as a teardown manufactures an incident out of an unset PATH.
   const sawARealServer = snapshot.serverAnswered !== false;
   const teardown =
-    sawARealServer && snapshot.panes.size === 0 && swept.length > 0 ? recordTeardown(snapshot, swept) : undefined;
+    sawARealServer && snapshot.panes.size === 0 && swept.some((a) => terminalOfRow(a) === "tmux") ? recordTeardown(snapshot, swept.filter((a) => terminalOfRow(a) === "tmux")) : undefined;
 
   const wakes = stmt(
     `SELECT wakes.id, wakes.due_at, wakes.held_reason, wakes.deliver_pane, wakes.deliver_actor, ${DELIVER_ROW_COLUMNS}
