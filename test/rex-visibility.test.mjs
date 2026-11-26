@@ -148,7 +148,7 @@ describe("worker visibility on tmux", () => {
       writeFileSync(briefs, "a file where the briefs directory goes, so the brief write fails inside launchAgent\n");
       await assert.rejects(
         mcp.call("agent_spawn", { name: "t-fails", command: fakeClaude("sleep 600"), placement: "window" }),
-        /EEXIST|ENOTDIR|not a directory|file already exists/,
+        /EEXIST.*briefs/,
       );
       rmSync(briefs);
       const first = await mcp.call("agent_spawn", { name: "t-one", command: fakeClaude("sleep 600"), placement: "window" });
