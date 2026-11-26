@@ -37,7 +37,7 @@ async function newBlock(command, label = "b") {
   const { rexApi } = await cli();
   const made = rexApi(REX_ADDR, "session.create", {
     label: `s-${label}-${Date.now()}`,
-    initial_windows: [{ window_label: label, layout: { block: { flavor: SHELL, label, options: { shell: "none", command } } } }],
+    initial_windows: [{ window_label: label, layout: { block: { flavor: SHELL, label, options: { shell: "none", login: false, command, exit: { on_completion: false } } } } }],
   });
   return { session: made.session_id, window: made.initial_windows[0].window_id, block: made.initial_windows[0].block_ids[0] };
 }

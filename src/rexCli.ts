@@ -127,6 +127,8 @@ function endpointOf(who: unknown): string | null {
   return typeof endpoint === "string" && endpoint ? endpoint : null;
 }
 
+export const rexCallerBlock = (): string | null => (process.env.REX_BLOCK && !process.env.TMUX ? process.env.REX_BLOCK : null);
+
 let cachedServer: string | null = null;
 let failedAt: number | null = null;
 

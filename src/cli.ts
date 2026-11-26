@@ -141,6 +141,7 @@ import {
   LEAD_NAME,
   mintLeadActorId,
   relayoutAfterPaneLeft,
+  rexLeadFor,
   upsertActor,
   withWindowClaim,
 } from "./spawn.js";
@@ -174,7 +175,7 @@ import {
 } from "./tmux.js"; import {
   adoptableWindow, applyLayout,
   appendGlobalHook, attachInteractive,
-  breakPane, callerSocket, callerTmuxTmpDir,
+  breakPane, callerSocket, callerTmuxSocket, callerTmuxTmpDir,
   claimInitialWindow, configureHiveWindow,
   createBareWindow, createWindow,
   ensureSession, findProjectWindow,
@@ -192,7 +193,7 @@ import {
   resolveInTmuxTarget,
   rowLive,
   resolveTerminal,
-  rowOwnership,
+  rowOwnership, terminalOfRow, isRexTarget, rexServerOf,
   serverEnvironment,
   sessionClients,
   setPaneTitle,
@@ -204,7 +205,7 @@ import {
   waitForPaneEstablished,
   windowLayout,
 } from "./terminal.js";
-import { RexNotImplemented, startLead as startRexLead } from "./terminal/rex.js";
+import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexRefuseQuickExit, rexRefusal } from "./terminal/rex.js";
 import { collectCrew, crewStoreProblem } from "./crew.js";
 import { resumeWorker, validateResumeWorker } from "./agentResume.js";
 import { markWorkerLost } from "./workerRecovery.js";
@@ -488,6 +489,7 @@ function startYmlCommand(
 ): StartResult {
 
   if (!trusted) return { status: "refused", reason: "untrusted" } as const;
+  if (rexLeadFor(project.id, currentActor())) return { status: "failed", message: rexRefusal("hive.yml processes") } as const;
 
   if (isReservedAgentName(name)) {
     return {
@@ -742,14 +744,25 @@ function resolveTerminalAndWarn(config: { terminal: Terminal | null } | null): R
   return resolved;
 }
 
-function refuseRexLead(config: { terminal: Terminal | null } | null): void {
-  if (resolveTerminalAndWarn(config).terminal !== "rex") return;
+function leadTerminal(previous: RowPaneIdentity, config: { terminal: Terminal | null } | null): Terminal {
+  if (previous.tmux_target && rowOwnership(previous) === "live") return terminalOfRow(previous);
+  return resolveTerminalAndWarn(config).terminal;
+}
+
+function rexLeadPane(project: Project, previous: RowPaneIdentity, envFlags: string[], launchCommand: string, codexHomeKey?: string) {
+  if (terminalOfRow(previous) === "rex" && rowOwnership(previous) === "live") {
+    return { leadPane: previous.tmux_target, leadWindow: "", createdPane: false, leadSocket: previous.tmux_socket, leadPid: "" };
+  }
   try {
-    startRexLead();
+    const placed = withWindowClaim(() => rexCreatePane({
+      projectId: project.id, projectName: project.name, label: `${project.name}/lead`, cwd: project.path,
+      env: envFromFlags(envFlags), argv: commandArgv(launchCommand), placement: "lead", retainOnExit: false,
+    }));
+    rexRefuseQuickExit(placed.target, rexServerOf(placed.socket));
+    return { leadPane: placed.target, leadWindow: placed.window, createdPane: true, leadSocket: placed.socket, leadPid: placed.pid };
   } catch (e) {
-    if (!(e instanceof RexNotImplemented)) throw e;
-    console.error(`hive lead: ${e.message}`);
-    process.exit(1);
+    if (codexHomeKey) reapCodexHome(codexHomeKey);
+    throw e;
   }
 }
 
@@ -772,7 +785,7 @@ async function cmdLead(argv: string[]): Promise<void> {
   const path = parsed.positional[0];
 
   const previewRoot = unregisteredLeadRoot(path);
-  if (previewRoot !== null) refuseRexLead(loadProjectYml(previewRoot).config);
+  if (previewRoot !== null) resolveTerminalAndWarn(loadProjectYml(previewRoot).config);
   let registrationNotice: string | null = null;
   try {
     const project = resolveProjectForWrite("hive lead", path, (text) => {
@@ -782,7 +795,7 @@ async function cmdLead(argv: string[]): Promise<void> {
     // Only rows running before this invocation began are leftovers, trust prompts included; a later `hive start` is not.
     const leftoverIds = new Set(runningCommandRows(project.id).map((row) => row.id));
     const { config, warnings, sources } = loadProjectYml(project.path);
-    if (previewRoot !== project.path) refuseRexLead(config);
+    if (previewRoot !== project.path) resolveTerminalAndWarn(config);
     if (detach && (!process.stdin.isTTY || !process.stdout.isTTY)) {
       let untrusted: string | undefined;
       if (config?.lead && !isTrusted(project.id, "lead", config.lead, null, {})) untrusted = "lead";
@@ -931,7 +944,8 @@ async function cmdLead(argv: string[]): Promise<void> {
     });
 
     const launchCommand = leadCommand + promptSuffix;
-    const { leadPane, leadWindow, createdPane } = withWindowClaim(() => {
+    const terminal = leadTerminal(previousIdentity, config);
+    const { leadPane, leadWindow, createdPane, leadSocket, leadPid } = terminal === "rex" ? rexLeadPane(project, previousIdentity, envFlags, launchCommand, newCodexHomeKey) : { leadSocket: callerTmuxSocket(), leadPid: "", ...withWindowClaim(() => {
       let leadPane: string;
       let leadWindow: string;
       let createdPane: boolean;
@@ -982,7 +996,7 @@ async function cmdLead(argv: string[]): Promise<void> {
         }
       }
       return { leadPane, leadWindow, createdPane };
-    });
+    }) };
 
     // The row may only claim a command hive just launched into a pane it made. On an adopt the
     // occupant is unknown, so the previous row's command stands (todo 507).
@@ -1006,8 +1020,9 @@ async function cmdLead(argv: string[]): Promise<void> {
     const abandonClaim = () => {
       if (createdPane) {
         try {
-          waitForPaneEstablished(leadPane);
-          killPane(leadPane);
+          if (isRexTarget(leadPane)) rexClose(leadPane, rexServerOf(leadSocket));
+          else waitForPaneEstablished(leadPane);
+          if (!isRexTarget(leadPane)) killPane(leadPane);
         } catch {
 
         }
@@ -1021,9 +1036,15 @@ async function cmdLead(argv: string[]): Promise<void> {
           "or could not be verified), so nothing was recorded. Re-run `hive lead`; it will start a fresh pane.",
       );
     }
-    const recordedPanePid = createdPane ? panePidForRecord(leadPane) : previousPanePid;
+    const recordedPanePid = createdPane ? leadPid || panePidForRecord(leadPane) : previousPanePid;
     if (recordedPanePid === "") {
       abandonClaim();
+      if (isRexTarget(leadPane)) {
+        throw new Error(
+          `Rex did not report a process id for the new lead block ${leadPane}, so it was closed rather than recorded: ` +
+            "a lead row with no pid can never be verified as owning its block. Re-run `hive lead`.",
+        );
+      }
       throw new Error(
         `tmux did not report a process id for the new lead pane ${leadPane} (asked twice), so it was discarded ` +
           "rather than recorded: a lead row with no pane pid can never be verified as owning its pane. Re-run `hive lead`.",
@@ -1041,7 +1062,7 @@ async function cmdLead(argv: string[]): Promise<void> {
           )
           .run(
             leadPane,
-            callerSocket(),
+            leadSocket,
             recordedPanePid,
             recordedCommand,
             recordedCodexHome,
@@ -1084,9 +1105,9 @@ async function cmdLead(argv: string[]): Promise<void> {
     }
 
     if (createdPane) {
-      armLeadPaneExitedHook();
+      if (terminal === "tmux") armLeadPaneExitedHook();
       clearLeftoverProcesses(project, config, leftoverIds);
-    } else if (!leadPaneExitedHookArmed()) {
+    } else if (terminal === "tmux" && !leadPaneExitedHookArmed()) {
       console.log(
         `! this tmux server carries no ${LEAD_PANE_EXITED_HOOK} backstop and hive arms one only on a pane it created, ` +
           "so this project's processes will outlive a crash here. Clear them with: hive stop --all",
@@ -1116,6 +1137,7 @@ async function cmdLead(argv: string[]): Promise<void> {
       return;
     }
     if (!noDashboard) maybeOpenDashboard(project, !!config?.dashboard);
+    if (terminal === "rex") return console.log(`- lead: Rex block ${leadPane} in tab "${project.name}"`);
     attach(session, project, leadWindow);
   } catch (e) {
 
@@ -1181,7 +1203,7 @@ async function cmdQueen(argv: string[]): Promise<void> {
       return false;
     }
   })();
-  refuseRexLead(ymlIsFile ? loadProjectYml(home).config : null);
+  resolveTerminalAndWarn(ymlIsFile ? loadProjectYml(home).config : null);
   mkdirSync(home, { recursive: true });
   publishQueenYml(home);
   const queen = addProject(home, "queen");
@@ -3456,7 +3478,7 @@ function cmdDoctor(argv: string[]): void {
       warn(
         `${row.kind} ${row.name}`,
         `recorded on tmux socket ${row.tmux_socket}, but this process would use ` +
-          `${callerSocket()}. The janitor cannot judge this row ` +
+          `${callerTmuxSocket()}. The janitor cannot judge this row ` +
           "from here, so it stays 'running' - and its name stays taken - until it is probed from wherever " +
           "that socket actually lives.",
       );

@@ -5,11 +5,14 @@ import {
   RexUnavailableError,
   rexApi,
   rexKey,
+  rexCallerBlock,
   rexLua,
   SNAPSHOT_SCRIPT,
 } from "../rexCli.js";
 import {
   ENTER_DELAY_MS,
+  paneEnvPath,
+  sessionName,
   findUnsafeControlChar,
   sleep,
   TEXT_ALLOWED_CONTROL_CHARS,
@@ -18,11 +21,12 @@ import {
   type RowPaneIdentity,
 } from "../tmux.js";
 
-export const REX_REFUSAL = "the Rex terminal is not available in this build; set HIVE_TERMINAL=tmux";
+export const rexRefusal = (operation: string): string =>
+  `${operation} is not available under the Rex terminal in this build; restart the lead with HIVE_TERMINAL=tmux to use it`;
 
 export class RexNotImplemented extends Error {
   constructor(readonly operation: string) {
-    super(REX_REFUSAL);
+    super(rexRefusal(operation));
     this.name = "RexNotImplemented";
   }
 }
@@ -31,12 +35,12 @@ const refuse = (operation: string): never => {
   throw new RexNotImplemented(operation);
 };
 
-export const startLead = (): never => refuse("startLead");
-export const spawnWorker = (): never => refuse("spawnWorker");
-export const startProcess = (): never => refuse("startProcess");
-export const respawnLead = (): never => refuse("respawnLead");
+export const startProcess = (): never => refuse("hive.yml processes");
+export const respawnLead = (): never => refuse("lead handoff");
+export const floatHidden = (): never => refuse("hidden workers");
 
 export interface RexStore {
+  inTransaction?: boolean;
   prepare(sql: string): { all(...params: unknown[]): unknown[]; get(...params: unknown[]): unknown; run(...params: unknown[]): unknown };
 }
 
@@ -60,6 +64,8 @@ export const REX_CAPTURE_BYTES_PER_LINE = 512;
 
 const BLOCK_GONE_CODES = new Set(["not_found", "session_not_found"]);
 const WRAPPER_PROGRAMS = new Set(["login"]);
+const ENV_PROGRAM = "env";
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
 export interface ProgramStatus {
   state: string;
@@ -473,7 +479,29 @@ function missingBlocksStillOpen(server: string, missing: string[]): boolean {
   }, true);
 }
 
-const commandHead = (command: string | null | undefined): string | null => programName(command?.trim().split(/\s+/)[0]);
+export function programWords(words: string[]): string[] {
+  if (programName(words[0]) !== ENV_PROGRAM) return words;
+  let i = 1;
+  while (i < words.length && ENV_ASSIGNMENT.test(words[i])) i++;
+  return words.slice(i);
+}
+
+const withoutAssignments = (words: string[]): string[] => {
+  const rest = programWords(words);
+  let i = 0;
+  while (i < rest.length && ENV_ASSIGNMENT.test(rest[i])) i++;
+  return rest[i] === "exec" ? rest.slice(i + 1) : rest.slice(i);
+};
+
+const firstProgram = (segment: string): string | null => programName(withoutAssignments(segment.trim().split(/\s+/))[0]);
+
+function commandHeads(command: string | null | undefined): string[] {
+  const text = command?.trim() ?? "";
+  if (!text) return [];
+  const launched = programName(programWords(commandArgv(text))[0]);
+  const segments = text.split(/&&|\|\||;/);
+  return [...new Set([launched, firstProgram(text), firstProgram(segments[segments.length - 1])].filter((h): h is string => !!h))];
+}
 
 function usableSnapshot(snap: RexSnapshot | null | undefined, server: string, target: string): boolean {
   if (snap === undefined || (snap !== null && snap.server !== server)) return false;
@@ -506,8 +534,9 @@ export function rexOwnership(row: RowPaneIdentity & { command?: string | null },
   if (block.exited) return "gone";
   if (row.pane_pid === "" || block.pid === "") return "unknown";
   if (block.pid !== row.pane_pid) return "reissued";
-  const head = commandHead(rowCommand(row));
-  if (head !== null && block.programs.length > 0 && !block.programs.includes(head)) return "reissued";
+  const heads = commandHeads(rowCommand(row));
+  const programs = block.programs.filter((p) => p !== ENV_PROGRAM);
+  if (heads.length > 0 && programs.length > 0 && !heads.some((h) => programs.includes(h))) return "reissued";
   return "live";
 }
 
@@ -567,4 +596,297 @@ export function rexStop(target: string, timeoutMs: number, server?: string): voi
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
   }
   rexClose(target, resolved);
+}
+
+export const REX_SHELL_FLAVOR = "com.superlogical.terminal.shell";
+export const REX_IN_USE_KEY = "terminal:rex:in-use";
+export const REX_QUICK_EXIT_MS = 1000;
+export const rexWindowKey = (projectId: number): string => `terminal:rex:window:${projectId}`;
+export const rexSocketOf = (server: string): string => `${REX_SOCKET_PREFIX}${server}`;
+
+export interface RexPaneSpec {
+  projectId: number;
+  projectName: string;
+  label: string;
+  cwd: string;
+  env: Record<string, string>;
+  argv: string[];
+  placement: "lead" | "split" | "window" | "hidden";
+  beside?: string;
+  retainOnExit: boolean;
+  size?: { columns: number; rows: number };
+}
+
+export interface RexPlaced {
+  target: string;
+  socket: string;
+  pid: string;
+  window: string;
+}
+
+export function envFromFlags(flags: string[]): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (let i = 0; i + 1 < flags.length; i += 2) {
+    if (flags[i] !== "-e") continue;
+    const eq = flags[i + 1].indexOf("=");
+    if (eq > 0) env[flags[i + 1].slice(0, eq)] = flags[i + 1].slice(eq + 1);
+  }
+  return env;
+}
+
+const SHELL_ONLY = /[;&|<>()$`*?~#{}[\]!\n]/;
+
+export function shellWords(command: string): string[] | null {
+  const words: string[] = [];
+  let word: string | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (c === " " || c === "\t") {
+      if (word !== null) words.push(word);
+      word = null;
+    } else if (c === "'") {
+      const end = command.indexOf("'", i + 1);
+      if (end < 0) return null;
+      word = (word ?? "") + command.slice(i + 1, end);
+      i = end;
+    } else if (c === '"') {
+      let text = "";
+      let j = i + 1;
+      for (; j < command.length && command[j] !== '"'; j++) {
+        if (command[j] === "$" || command[j] === "`") return null;
+        if (command[j] === "\\" && '"\\$`'.includes(command[j + 1] ?? "")) j++;
+        text += command[j];
+      }
+      if (j >= command.length) return null;
+      word = (word ?? "") + text;
+      i = j;
+    } else if (c === "\\") {
+      if (i + 1 >= command.length) return null;
+      word = (word ?? "") + command[++i];
+    } else if (SHELL_ONLY.test(c)) {
+      return null;
+    } else {
+      word = (word ?? "") + c;
+    }
+  }
+  if (word !== null) words.push(word);
+  return words;
+}
+
+const SHELL_BUILTINS = new Set(["cd", "source", ".", "export", "set", "unset", "alias", "eval", "ulimit", "umask", "trap", "builtin", "command"]);
+export const REX_SHELL = "/bin/sh";
+
+export function commandArgv(command: string): string[] {
+  const parsed = shellWords(command);
+  const words = parsed?.[0] === "exec" ? parsed.slice(1) : parsed;
+  if (words && words.length > 0 && !words[0].includes("=") && !SHELL_BUILTINS.has(words[0])) return words;
+  return [REX_SHELL, "-c", command];
+}
+
+export const REX_ENV_PROGRAM = "/usr/bin/env";
+export const rexPanePath = (): string => paneEnvPath() ?? process.env.PATH ?? "";
+
+export function rexBlockCommand(env: Record<string, string>, argv: string[]): string[] {
+  const path = rexPanePath();
+  return [REX_ENV_PROGRAM, ...(path ? [`PATH=${path}`] : []), ...Object.entries(env).map(([k, v]) => `${k}=${v}`), ...argv];
+}
+
+interface WindowHit {
+  session: string;
+  window: string;
+}
+
+function resolveOne(server: string, kind: "window" | "block", query: string, scope: string): (WindowHit & { block: string }) | null {
+  const reply = rexApi<{ results?: { status?: string; target?: { session_id?: string; window_id?: string; block_id?: string } | null }[] | null }>(
+    server,
+    "target.resolve",
+    { kinds: [kind], queries: [query], scope: { session: scope } },
+  );
+  const hit = reply.results?.[0];
+  if (hit?.status !== "resolved" || !hit.target?.session_id) return null;
+  return { session: hit.target.session_id, window: hit.target.window_id ?? "", block: hit.target.block_id ?? "" };
+}
+
+function recordedWindow(projectId: number): string | null {
+  if (store === null) return null;
+  const row = guarded(
+    () => sql().prepare("SELECT value FROM kv WHERE project_id = ? AND key = ?").get(projectId, rexWindowKey(projectId)) as { value: string } | undefined,
+    undefined,
+  );
+  return row?.value || null;
+}
+
+function writeKv(projectId: number, key: string, value: string): void {
+  if (store === null) return;
+  sql()
+    .prepare(
+      `INSERT INTO kv (project_id, key, value, updated_by) VALUES (?, ?, ?, 'hive')
+       ON CONFLICT (project_id, key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
+    )
+    .run(projectId, key, value);
+}
+
+function leadBlockOf(projectId: number): string | null {
+  if (store === null) return null;
+  const row = guarded(
+    () =>
+      sql()
+        .prepare("SELECT tmux_target FROM agents WHERE project_id = ? AND kind = 'lead' AND status = 'running' AND tmux_target LIKE 'block:%' ORDER BY id DESC LIMIT 1")
+        .get(projectId) as { tmux_target: string } | undefined,
+    undefined,
+  );
+  return row?.tmux_target ?? null;
+}
+
+const callerBlock = rexCallerBlock;
+
+function homeSession(server: string): string {
+  const caller = callerBlock();
+  if (caller) {
+    try {
+      return rexSessionOf(server, caller);
+    } catch (err) {
+      if (!blockGone(err)) throw err;
+    }
+  }
+  const label = sessionName();
+  const reply = rexApi<{ results?: { status?: string; target?: { session_id?: string } | null; candidates?: { kind?: string; session_id?: string }[] | null }[] | null }>(
+    server,
+    "target.resolve",
+    { kinds: ["session"], queries: [label] },
+  );
+  const hit = reply.results?.[0];
+  if (hit?.status === "resolved" && hit.target?.session_id) return hit.target.session_id;
+  const candidate = hit?.status === "ambiguous" ? hit.candidates?.find((c) => c.kind === "session" && c.session_id)?.session_id : undefined;
+  if (candidate) return candidate;
+  return rexApi<{ session_id: string }>(server, "session.create", { label }).session_id;
+}
+
+function findWindow(server: string, window: string, likely: string[]): WindowHit | null {
+  const look = (scope: string): WindowHit | null => {
+    try {
+      const hit = resolveOne(server, "window", window, scope);
+      return hit ? { session: hit.session, window: hit.window || window } : null;
+    } catch (err) {
+      if (!blockGone(err)) throw err;
+      return null;
+    }
+  };
+  for (const scope of [...new Set(likely)]) {
+    const hit = look(scope);
+    if (hit) return hit;
+  }
+  const listed = rexApi<{ sessions?: { session_id?: string }[] | null }>(server, "session.list", {});
+  for (const s of listed.sessions ?? []) {
+    const hit = s.session_id ? look(s.session_id) : null;
+    if (hit) return hit;
+  }
+  return null;
+}
+
+export function rexEnsureHome(projectId: number, _projectName: string): { session: string; window: string } {
+  const server = requireServer("", null);
+  const recorded = recordedWindow(projectId);
+  if (recorded) {
+    const scopes = [leadBlockOf(projectId), callerBlock(), sessionName()].filter((s): s is string => !!s);
+    const found = findWindow(server, recorded, scopes);
+    if (found) return found;
+  }
+  return { session: homeSession(server), window: "" };
+}
+
+function blockSize(server: string, session: string, block: string): { columns: number; rows: number } | undefined {
+  const size = guarded(() => blockMethod<{ columns?: number; rows?: number }>(server, session, block, "size"), {});
+  return size.columns && size.rows ? { columns: size.columns, rows: size.rows } : undefined;
+}
+
+interface CreatedReply {
+  window_id?: string | null;
+  block_ids?: (string | null)[] | null;
+}
+
+export function rexCreatePane(spec: RexPaneSpec): RexPlaced {
+  if (spec.placement === "hidden") floatHidden();
+  if (store !== null && store.inTransaction === false) {
+    throw new Error("rexCreatePane must run inside withWindowClaim, so two hive processes cannot create the same project's tab");
+  }
+  const server = requireServer(spec.beside ?? "", null);
+  let session: string;
+  let window = "";
+  let anchor: WindowHit & { block: string } | null = null;
+  if (spec.placement === "lead") {
+    const home = rexEnsureHome(spec.projectId, spec.projectName);
+    session = home.session;
+    window = home.window;
+  } else {
+    if (!spec.beside) throw new RexError(`a ${spec.placement} block needs the lead block to sit beside`, "bad_request", "");
+    anchor = resolveOne(server, "block", spec.beside, spec.beside);
+    if (!anchor) throw new RexError(`the lead block ${spec.beside} is not open on ${server}`, "not_found", "");
+    session = anchor.session;
+  }
+  const size = spec.size ?? (spec.beside ? blockSize(server, session, spec.beside) : undefined);
+  const layout = {
+    block: {
+      flavor: REX_SHELL_FLAVOR,
+      label: spec.label,
+      options: {
+        shell: "none",
+        login: false,
+        command: rexBlockCommand(spec.env, spec.argv),
+        cwd: spec.cwd,
+        exit: { on_completion: !spec.retainOnExit, quick_exit_threshold_ms: REX_QUICK_EXIT_MS },
+        ...(size ? { size } : {}),
+      },
+    },
+  };
+  let reply: CreatedReply;
+  if (spec.placement === "split") {
+    reply = rexApi<CreatedReply>(server, "session.new_split", {
+      session_id: session, anchor_id: spec.beside, direction: "horizontal", side: "after", layout, focus: false,
+    });
+    window = anchor!.window;
+  } else if (spec.placement === "lead" && window) {
+    reply = rexApi<CreatedReply>(server, "session.new_split", {
+      session_id: session, window_id: window, direction: "horizontal", side: "before", layout, focus: false,
+    });
+  } else {
+    reply = rexApi<CreatedReply>(server, "session.new_window", {
+      session_id: session, window_label: spec.placement === "lead" ? spec.projectName : spec.label, layout, focus: false,
+    });
+    window = reply.window_id ?? "";
+    if (spec.placement === "lead" && window) writeKv(spec.projectId, rexWindowKey(spec.projectId), window);
+  }
+  const target = reply.block_ids?.[0];
+  if (!target) throw new RexError(`rex created no block for ${spec.label}`, "bad_output", "");
+  writeKv(spec.projectId, REX_IN_USE_KEY, "1");
+  const probe = rexProbe(target, server);
+  if (probe.exited) quickExit(target, server);
+  return { target, socket: rexSocketOf(server), pid: probe.pid ?? "", window };
+}
+
+export class RexQuickExit extends Error {
+  constructor(readonly target: string, readonly screen: string) {
+    super(
+      `The command exited immediately, so its block ${target} was closed rather than recorded as running. ` +
+        `Check the command and its arguments, then retry.${screen ? ` Its screen:\n${screen}` : ""}`,
+    );
+    this.name = "RexQuickExit";
+  }
+}
+
+function quickExit(target: string, server?: string): never {
+  const screen = guarded(() => rexCapture(target, 200, false, server).trim(), "");
+  rexClose(target, server);
+  throw new RexQuickExit(target, screen);
+}
+
+export function rexRefuseQuickExit(target: string, server?: string, windowMs = REX_QUICK_EXIT_MS): void {
+  const deadline = Date.now() + windowMs;
+  for (;;) {
+    const probe = rexProbe(target, server);
+    if (probe.exited) quickExit(target, server);
+    if (probe.live === false) throw new RexQuickExit(target, "");
+    if (Date.now() >= deadline) return;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+  }
 }

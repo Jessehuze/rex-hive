@@ -136,13 +136,58 @@ function requireBlock(state, params) {
 function childEnv(state, block) {
   const env = {};
   for (const [k, v] of Object.entries(process.env)) {
-    if (k.startsWith("REX_") || k === "OSC7577_TOKEN" || (k.startsWith("FAKE_REX_") && k !== "FAKE_REX_STATE" && k !== "FAKE_REX_OWNER")) continue;
+    if (k.startsWith("REX_") || k.startsWith("HIVE_") || k === "OSC7577_TOKEN" || (k.startsWith("FAKE_REX_") && k !== "FAKE_REX_STATE" && k !== "FAKE_REX_OWNER")) continue;
     env[k] = v;
   }
+  if (!loginWrapped(block)) env.PATH = MINIMAL_PATH;
   env.REX_SERVER = state.address;
   env.REX_BLOCK = block.block_id;
   env.REX_SESSION = block.session_id;
   return env;
+}
+
+const BLOCK_OPTION_KEYS = new Set(["args", "command", "cwd", "exit", "initial_input", "interactive", "login", "path_prepend", "shell", "size", "theme"]);
+const EXIT_OPTION_KEYS = new Set(["on_completion", "quick_exit_threshold_ms"]);
+const MINIMAL_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
+const loginWrapped = (block) => block.options?.login !== false;
+
+function checkOptions(options) {
+  if (options === undefined) return;
+  for (const key of Object.keys(options)) if (!BLOCK_OPTION_KEYS.has(key)) fail("bad_request", `unknown block option ${key}`);
+  if (options.shell === "none" && !Array.isArray(options.command)) fail("bad_request", "shell none needs command as an argv array");
+  if (options.exit !== undefined && (typeof options.exit !== "object" || Object.keys(options.exit).some((k) => !EXIT_OPTION_KEYS.has(k)))) fail("bad_request", "exit is {on_completion, quick_exit_threshold_ms}");
+}
+
+const ENV_WORD = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+const SH_SIMPLE = /^[^;&|<>()$`*?\n'"\\]*$/;
+
+function execedProgram(command) {
+  let i = 0;
+  if (basename(command[0]) === "env") {
+    i = 1;
+    while (i < command.length && ENV_WORD.test(command[i])) i++;
+  }
+  const program = command[i] ?? command[0];
+  const script = command[i + 2];
+  if (basename(program) === "sh" && command[i + 1] === "-c" && typeof script === "string" && SH_SIMPLE.test(script)) {
+    const words = script.trim().split(/\s+/).filter((w) => !ENV_WORD.test(w));
+    if (words[0] && words[0] !== "exec") return words[0];
+    if (words[1]) return words[1];
+  }
+  return program;
+}
+
+function reapCompleted(state) {
+  for (const block of Object.values(state.blocks)) {
+    const exit = processInfo(block).last_exit;
+    if (!exit || block.options?.exit?.on_completion === false) continue;
+    const threshold = block.options?.exit?.quick_exit_threshold_ms ?? 250;
+    const raw = exitOf(block);
+    const failed = (exit.exit_code ?? 0) !== 0;
+    if (failed && (raw?.at ?? 0) - (block.started_at ?? 0) < threshold) continue;
+    closeBlock(state, block);
+  }
 }
 
 function commandOf(options) {
@@ -158,6 +203,7 @@ function startProcess(state, block) {
   writeFileSync(join(block.dir, "input"), "");
   writeFileSync(join(block.dir, "output"), "");
   const owner = process.env.FAKE_REX_OWNER ?? "0";
+  block.started_at = Date.now();
   const relay = spawn(process.execPath, [RELAY, block.dir, block.cwd, STATE, owner, ...block.command], {
     detached: true,
     stdio: "ignore",
@@ -193,6 +239,7 @@ function killProcess(block) {
 }
 
 function createBlock(state, sessionId, spec) {
+  checkOptions(spec.options);
   const id = `block:${randomUUID()}`;
   const block = {
     block_id: id,
@@ -279,6 +326,11 @@ function exitOf(block) {
 }
 
 function screenOf(block) {
+  const banner = loginWrapped(block) ? "Last login: Thu Jan  1 00:00:00 on ttys000\n" : "";
+  return Buffer.concat([Buffer.from(banner), rawScreenOf(block)]);
+}
+
+function rawScreenOf(block) {
   const big = join(block.dir, "screen");
   if (existsSync(big)) return readFileSync(big);
   if (block.screen !== null) return Buffer.from(block.screen);
@@ -311,9 +363,15 @@ function jsonBoundedSlice(buf, start, maxBytes) {
 }
 
 function processInfo(block) {
-  const exit = exitOf(block);
+  const raw = exitOf(block);
+  const { at: _at, ...ended } = raw ?? {};
+  const exit = raw && loginWrapped(block) ? { exit_code: 0 } : raw ? ended : null;
+  if (loginWrapped(block) && block.child_pid && !exit) {
+    const login = { pid: block.child_pid, name: "login", argv0: null, cwd: block.cwd, user: process.env.USER ?? "", user_id: process.getuid?.() ?? 0 };
+    return { child: login, foreground: login, home: FAKE_HOME, last_exit: null };
+  }
   const proc = block.child_pid && !exit
-    ? { pid: block.child_pid, name: basename(block.command[0]), argv0: block.command[0], path: block.command[0], invoked_path: block.command[0], cwd: block.cwd, user: process.env.USER ?? "", user_id: process.getuid?.() ?? 0 }
+    ? { pid: block.child_pid, name: basename(execedProgram(block.command)), argv0: execedProgram(block.command), path: execedProgram(block.command), invoked_path: execedProgram(block.command), cwd: block.cwd, user: process.env.USER ?? "", user_id: process.getuid?.() ?? 0 }
     : null;
   if (exit) return { home: FAKE_HOME, last_exit: exit };
   return proc ? { child: proc, foreground: proc, home: FAKE_HOME, last_exit: null } : { home: FAKE_HOME, last_exit: null };
@@ -408,7 +466,9 @@ function viewOf(state, session) {
 
 function resolveTargets(state, params) {
   const kinds = params.kinds?.length ? params.kinds : ["session", "window", "block"];
-  const scope = params.scope?.session ? state.sessions.find((s) => s.session_id === params.scope.session || s.label === params.scope.session) : null;
+  const scopeId = state.blocks[params.scope?.session]?.session_id ?? params.scope?.session;
+  const scope = params.scope?.session ? state.sessions.find((s) => s.session_id === scopeId || s.label === scopeId) : null;
+  if (params.scope?.session && kinds.includes("session")) fail("bad_request", "scope is not allowed when kinds includes session");
   const inScope = (sid) => !params.scope?.session || sid === scope?.session_id;
   const matches = (id, label, q) => id === q || id.endsWith(q) || (label && label === q);
   return {
@@ -441,8 +501,28 @@ function anchorWindow(state, block) {
   return { window, layer: window.layers.find((l) => l.layer_id === block.layer_id) };
 }
 
+const SCHEMAS = {
+  "session.new_window": { keys: ["focus", "layout", "session_id", "window_label"], required: ["session_id", "layout"] },
+  "session.new_split": { keys: ["anchor_id", "direction", "focus", "layout", "ratio", "session_id", "side", "window_id"], required: ["session_id", "direction", "side", "layout"] },
+  "session.new_block": { keys: ["flavor", "label", "options", "session_id"], required: ["session_id", "flavor"] },
+  "session.create": { keys: ["initial_windows", "label"], required: [] },
+  "session.set_block_label": { keys: ["block_id", "label", "session_id"], required: ["session_id", "block_id"] },
+  "session.set_window_label": { keys: ["label", "session_id", "window_id"], required: ["session_id", "window_id"] },
+  "target.resolve": { keys: ["context", "kinds", "queries", "scope"], required: ["kinds", "queries"] },
+};
+
+function checkSchema(method, params) {
+  const schema = SCHEMAS[method];
+  if (!schema) return;
+  for (const key of Object.keys(params)) if (!schema.keys.includes(key)) fail("bad_request", `${method} has no argument ${key}`);
+  for (const key of schema.required) if (params[key] === undefined || params[key] === null) fail("bad_request", `${method} needs ${key}`);
+  if (method === "session.new_split" && !["horizontal", "vertical"].includes(params.direction)) fail("bad_request", "direction is horizontal or vertical");
+  if (method === "session.new_split" && !["before", "after"].includes(params.side)) fail("bad_request", "side is before or after");
+}
+
 function apiCall(state, method, params) {
   if (process.env.FAKE_REX_FAIL_ON === method) fail("internal", `injected failure on ${method}`);
+  checkSchema(method, params);
   if (method.startsWith(`${TERMINAL}.`)) return blockMethod(state, params, method.slice(TERMINAL.length + 1), params.args ?? {});
   switch (method) {
     case "server.status":
@@ -764,6 +844,7 @@ function main(argv) {
     process.stderr.write(`Error: no Rex server is running at ${socketPathOf(server)}, and autostart is disabled\n`);
     return 4;
   }
+  withLock(reapCompleted);
   const [cmd, ...tail] = rest;
   switch (cmd) {
     case "whoami": {

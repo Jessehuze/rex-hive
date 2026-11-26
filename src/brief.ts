@@ -26,6 +26,7 @@ export interface BriefContext {
 
   profile?: string | null;
   vars?: Record<string, string>;
+  rex?: boolean;
 }
 
 function briefVars(ctx: BriefContext): Record<string, string> {
@@ -42,6 +43,8 @@ function briefVars(ctx: BriefContext): Record<string, string> {
 }
 
 const WAIT_FOR_ASSIGNMENT = "Run whoami to confirm scope, then wait for your assignment.";
+export const REX_WORKER_BRIEF_LINE = "Do not create, close, move or rename Rex blocks, windows or sessions; ask your lead.";
+const waitLine = (ctx: BriefContext): string => (ctx.rex ? `${REX_WORKER_BRIEF_LINE}\n${WAIT_FOR_ASSIGNMENT}` : WAIT_FOR_ASSIGNMENT);
 
 // harness_claude is the default for anything that is not codex, not an equality check against
 // "claude" - a presence-conditional has no else, so an unrecognised harness still needs one.
@@ -69,7 +72,7 @@ export function mergedBriefVars(
 export function workerBrief(ctx: BriefContext): string {
   if (ctx.profile) {
     const template = readProfileFile(ctx.profile, "worker.md");
-    if (template != null) return `${renderTemplate(template, briefVars(ctx)).trimEnd()}\n\n${WAIT_FOR_ASSIGNMENT}`;
+    if (template != null) return `${renderTemplate(template, briefVars(ctx)).trimEnd()}\n\n${waitLine(ctx)}`;
   }
   return defaultWorkerBrief(ctx);
 }
@@ -85,7 +88,7 @@ Coordinate through the hive MCP tools:
 - todo_comment for handoffs (changed files, tests run, remaining risk), then todo_complete.
 - lease_acquire before changing state another session can also change (a shared checkout, a dev database, a port); files in a directory only you work in need none. Leases expire on their own.
 If the hive MCP tools are unavailable in this session, write progress and results to stdout; the orchestrator will read your terminal.
-${WAIT_FOR_ASSIGNMENT}
+${waitLine(ctx)}
 [END HIVE CONTEXT]`;
 }
 

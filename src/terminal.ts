@@ -1,5 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { isTerminal, readGlobalConfig, type Terminal } from "./globalConfig.js";
+import { defaultRexServer } from "./rexCli.js";
 import {
   rexBlockAlive,
   rexCapture,
@@ -138,7 +139,12 @@ const callerInRex = (): boolean => !!process.env.REX_BLOCK && !process.env.TMUX 
 
 export const callerPane = (): string => (callerInRex() ? process.env.REX_BLOCK ?? "" : process.env.TMUX_PANE ?? "");
 
-export const callerSocket = (): string => tmuxSocketPath(process.env.TMUX, process.env.TMUX_TMPDIR);
+export const callerTmuxSocket = (): string => tmuxSocketPath(process.env.TMUX, process.env.TMUX_TMPDIR);
+
+export const callerSocket = (): string => {
+  const server = callerInRex() ? defaultRexServer() : null;
+  return server ? `rex:${server}` : callerTmuxSocket();
+};
 
 export const callerTmuxTmpDir = (): string | undefined => process.env.TMUX_TMPDIR;
 

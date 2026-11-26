@@ -22,7 +22,7 @@ import {
   type RowOwnership, type WindowLayout,
   type RowPaneIdentity,
 } from "./tmux.js"; import {
-  applyLayout, callerSocket,
+  applyLayout, callerTmuxSocket, isRexSocket, isRexTarget, rexServerOf, terminalOfRow,
   claimInitialWindow, createWindow,
   ensureSession, crossServerRefusal,
   findProcessesWindow, findProjectWindow,
@@ -42,6 +42,7 @@ import {
   waitForPaneEstablished,
   rowOwnership,
 } from "./terminal.js";
+import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexRefuseQuickExit, startProcess as refuseRexProcess } from "./terminal/rex.js";
 
 export function withWindowClaim<T>(claim: () => T): T {
   if (db.inTransaction) {
@@ -149,7 +150,8 @@ function recordPane(agentId: number, target: string, socket: string, pid: string
 
 // The creation pid proves the pane existed, not that its process still runs. A retained pane is
 // left to the caller's readiness wait, which reports the exit with its tail.
-function refuseIfExitedImmediately(target: string, retained: boolean): void {
+function refuseIfExitedImmediately(target: string, retained: boolean, socket?: string): void {
+  if (isRexTarget(target)) return retained ? undefined : rexRefuseQuickExit(target, rexServerFrom(socket));
   if (retained || paneProcessExited(target) !== true) return;
   discardOrphanedPane(target);
   throw new Error(
@@ -158,9 +160,15 @@ function refuseIfExitedImmediately(target: string, retained: boolean): void {
   );
 }
 
-export function createdPidOrDiscard(target: string, pid: string): string {
+export function createdPidOrDiscard(target: string, pid: string, socket?: string): string {
   if (/^\d+$/.test(pid)) return pid;
-  discardOrphanedPane(target);
+  discardOrphanedPane(target, socket);
+  if (isRexTarget(target)) {
+    throw new Error(
+      `Rex did not report a process id for the new block ${target} when it created it, so it was closed rather ` +
+        "than recorded: a row with no pid can never be verified as owning its block. Retry.",
+    );
+  }
   throw new Error(
     `tmux did not report a process id for the new pane ${target} when it created it, so it was discarded rather ` +
       "than recorded: a row with no pane pid can never be verified as owning its pane. Retry.",
@@ -193,7 +201,15 @@ export function killAgentPaneWithoutRelayout(target: string): void {
   if (isPaneTarget(target)) killPane(target); else killWindow(target);
 }
 
-export function discardOrphanedPane(target: string): void {
+const rexServerFrom = (socket?: string): string | undefined => (socket && isRexSocket(socket) ? rexServerOf(socket) : undefined);
+
+export function discardOrphanedPane(target: string, socket?: string): void {
+  if (isRexTarget(target) && rexServerFrom(socket)) {
+    try {
+      rexClose(target, rexServerFrom(socket));
+    } catch {}
+    return;
+  }
   try {
     waitForPaneEstablished(target);
     killPane(target);
@@ -240,6 +256,41 @@ export function upsertActor(actorId: string, name: string, kind: string): void {
   ).run(actorId, name, kind);
 }
 
+export function rexLeadFor(projectId: number, parentActor: string): { tmux_target: string; tmux_socket: string } | null {
+  const row = (db
+    .prepare("SELECT tmux_target, tmux_socket FROM agents WHERE actor_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1")
+    .get(parentActor) ??
+    db
+      .prepare("SELECT tmux_target, tmux_socket FROM agents WHERE project_id = ? AND kind = ? AND status = 'running' ORDER BY id DESC LIMIT 1")
+      .get(projectId, LEAD_KIND)) as { tmux_target: string; tmux_socket: string } | undefined;
+  return row && terminalOfRow(row) === "rex" ? row : null;
+}
+
+type PlacedPane = {
+  target: string; pid: string; landedInProjectId: number | null; layoutApplied: boolean; inProcessesWindow: boolean; socket?: string;
+};
+
+function placeRexPane(
+  spec: Pick<LaunchSpec, "projectId" | "projectName" | "name" | "cwd" | "placement" | "retainOnExit">,
+  lead: { tmux_target: string },
+  envFlags: string[],
+  commandString: string,
+): PlacedPane {
+  if (spec.placement === "processes") refuseRexProcess();
+  const placed = withWindowClaim(() => rexCreatePane({
+    projectId: spec.projectId,
+    projectName: spec.projectName,
+    label: `${spec.projectName}/${spec.name}`,
+    cwd: spec.cwd,
+    env: envFromFlags(envFlags),
+    argv: commandArgv(commandString),
+    placement: spec.placement === "window" ? "window" : "split",
+    beside: lead.tmux_target,
+    retainOnExit: spec.retainOnExit ?? false,
+  }));
+  return { target: placed.target, pid: placed.pid, socket: placed.socket, landedInProjectId: null, layoutApplied: false, inProcessesWindow: false };
+}
+
 function placeAgentPane(
   session: string,
   spec: Pick<
@@ -258,7 +309,9 @@ function placeAgentPane(
   commandString: string,
   title: string,
   onRetainArmed: (window: string) => void = () => {},
-): { target: string; pid: string; landedInProjectId: number | null; layoutApplied: boolean; inProcessesWindow: boolean } {
+): PlacedPane {
+  const rexLead = rexLeadFor(spec.projectId, spec.parentActor);
+  if (rexLead) return placeRexPane(spec, rexLead, envFlags, commandString);
   let landedInProjectId: number | null = null;
   let layoutApplied = false;
   let inProcessesWindow = false;
@@ -338,7 +391,7 @@ export function launchAgent(spec: LaunchSpec): {
 
   if (untrustedTmuxServer()) throw crossServerRefusal("spawn");
 
-  const socket = callerSocket();
+  const socket = callerTmuxSocket();
   let info;
   try {
     info = db
@@ -396,12 +449,12 @@ export function launchAgent(spec: LaunchSpec): {
       retainedWindow = window;
     });
     const { target, landedInProjectId, layoutApplied, inProcessesWindow } = placed;
-    const pid = createdPidOrDiscard(target, placed.pid);
-    refuseIfExitedImmediately(target, spec.retainOnExit ?? false);
+    const pid = createdPidOrDiscard(target, placed.pid, placed.socket);
+    refuseIfExitedImmediately(target, spec.retainOnExit ?? false, placed.socket);
     paneUp = true;
 
-    if (!recordPane(agentId, target, socket, pid)) {
-      discardOrphanedPane(target);
+    if (!recordPane(agentId, target, placed.socket ?? socket, pid)) {
+      discardOrphanedPane(target, placed.socket);
       throw paneRacedRetirement(agentId);
     }
     return { agentId, actorId, target, landedInProjectId, layoutApplied, inProcessesWindow, retainedWindow };
@@ -476,7 +529,7 @@ export function resumeAgent(
 ): { target: string; landedInProjectId: number | null } {
 
   if (untrustedTmuxServer()) throw crossServerRefusal("resume");
-  const socket = callerSocket();
+  const socket = callerTmuxSocket();
 
   let flip: { before: Record<string, string | null> | undefined; changes: number };
 
@@ -520,12 +573,12 @@ export function resumeAgent(
     const title = windowTitle(spec.projectName, spec.name);
     const placed = placeAgentPane(session, spec, envFlags, spec.commandString, title);
     const { target, landedInProjectId } = placed;
-    const pid = createdPidOrDiscard(target, placed.pid);
-    refuseIfExitedImmediately(target, false);
+    const pid = createdPidOrDiscard(target, placed.pid, placed.socket);
+    refuseIfExitedImmediately(target, false, placed.socket);
     paneUp = true;
 
-    if (!recordPane(spec.agentId, target, socket, pid)) {
-      discardOrphanedPane(target);
+    if (!recordPane(spec.agentId, target, placed.socket ?? socket, pid)) {
+      discardOrphanedPane(target, placed.socket);
       throw paneRacedRetirement(spec.agentId);
     }
     return { target, landedInProjectId };

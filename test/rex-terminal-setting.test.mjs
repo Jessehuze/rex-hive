@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 import { parse } from "yaml";
@@ -22,7 +22,6 @@ const dirs = scratchDirs();
 process.env.HIVE_DATA_DIR = dirs.dataDir;
 delete process.env.HIVE_TERMINAL;
 
-const REFUSAL = "hive lead: the Rex terminal is not available in this build; set HIVE_TERMINAL=tmux";
 const clients = [];
 let sessionToClean = null;
 
@@ -115,20 +114,6 @@ describe("terminal setting", () => {
     assert.deepEqual(quiet, []);
   });
 
-  it("hive lead names an unknown HIVE_TERMINAL before refusing for the hive.yml rex", async () => {
-    const dir = freshProject("lead-env-unknown", "terminal: rex\n");
-    const result = await runCli(["lead", dir, "--detach"], {
-      cwd: dir,
-      dataDir: dirs.dataDir,
-      tmp: dirs.tmp,
-      env: { HIVE_TERMINAL: "TMUX" },
-    });
-    assert.equal(result.code, 1, result.stdout + result.stderr);
-    const warning = result.stderr.indexOf('! HIVE_TERMINAL: terminal must be "tmux" or "rex"; ignoring "TMUX".');
-    assert.ok(warning >= 0, result.stderr);
-    assert.ok(result.stderr.indexOf(REFUSAL) > warning, result.stderr);
-  });
-
   it("doctor's config terminal row shows the resolved terminal and its source", { skip: hasTmux ? false : "tmux is not installed" }, async () => {
     const doctor = async ({ global, env = {} }) => {
       const own = scratchDirs();
@@ -205,21 +190,6 @@ describe("terminal setting", () => {
     assert.equal(parse(readFileSync(join(own.dataDir, "hive.yml"), "utf8")).terminal, "rex");
   });
 
-  it("hive lead with terminal rex refuses with the way back", async () => {
-    const { db } = await dist();
-    const dir = freshProject("lead-rex", "terminal: rex\n");
-    const result = await runCli(["lead", dir, "--detach"], { cwd: dir, dataDir: dirs.dataDir, tmp: dirs.tmp });
-    assert.equal(result.code, 1, result.stdout + result.stderr);
-    assert.ok(result.stderr.includes(REFUSAL), result.stderr);
-    assert.match(result.stderr, /HIVE_TERMINAL=tmux/);
-    const leads = db.prepare(
-      "SELECT COUNT(*) AS n FROM agents a JOIN projects p ON p.id = a.project_id WHERE p.path = ? AND a.kind = 'lead'",
-    ).get(dir);
-    assert.equal(leads.n, 0, "a refused lead must not leave a lead row behind");
-    const registered = db.prepare("SELECT COUNT(*) AS n FROM projects WHERE path = ?").get(dir);
-    assert.equal(registered.n, 0, "a refused lead in an unregistered dir must not register it");
-  });
-
   it("hive lead <registered path> from a pinned session with a closed row reaches the trust check, not a cached pin failure", async () => {
     const { db } = await dist();
     const dir = freshProject("closed-pin-target");
@@ -259,41 +229,6 @@ describe("terminal setting", () => {
     const warning = '! HIVE_TERMINAL: terminal must be "tmux" or "rex"; ignoring "TMUX".';
     assert.equal(result.stderr.split(warning).length - 1, 1, result.stderr);
     assert.match(result.stdout, /terminal {5}tmux \(source: default\)/);
-  });
-
-  it("hive lead in an already registered project with terminal rex refuses and records no lead", async () => {
-    const { db } = await dist();
-    const dir = freshProject("lead-rex-registered");
-    const opts = { cwd: dir, dataDir: dirs.dataDir, tmp: dirs.tmp };
-    assert.equal((await runCli(["init", "--no-profile"], opts)).code, 0);
-    writeFileSync(join(dir, "hive.yml"), "terminal: rex\n");
-    const result = await runCli(["lead", dir, "--detach"], opts);
-    assert.equal(result.code, 1, result.stdout + result.stderr);
-    assert.ok(result.stderr.includes(REFUSAL), result.stderr);
-    const leads = db.prepare(
-      "SELECT COUNT(*) AS n FROM agents a JOIN projects p ON p.id = a.project_id WHERE p.path = ? AND a.kind = 'lead'",
-    ).get(dir);
-    assert.equal(leads.n, 0);
-  });
-
-  it("hive queen under HIVE_TERMINAL=rex refuses with the same way back before creating anything", async () => {
-    const own = scratchDirs();
-    const result = await runCli(["queen", "--no-dashboard"], {
-      cwd: own.projectDir,
-      dataDir: own.dataDir,
-      tmp: own.tmp,
-      env: { HIVE_TERMINAL: "rex" },
-    });
-    assert.equal(result.code, 1, result.stdout + result.stderr);
-    assert.ok(result.stderr.includes(REFUSAL), result.stderr);
-    const { default: Database } = await import("better-sqlite3");
-    const store = new Database(join(own.dataDir, "hive.db"), { readonly: true });
-    const leads = store.prepare("SELECT COUNT(*) AS n FROM agents WHERE kind = 'lead'").get().n;
-    const projects = store.prepare("SELECT COUNT(*) AS n FROM projects").get().n;
-    store.close();
-    assert.equal(leads, 0);
-    assert.equal(projects, 0, "a refused queen must not register its project");
-    assert.equal(existsSync(join(own.dataDir, "queen")), false, "a refused queen must not create its home");
   });
 
   it("rexInUse reads the kv flag and the cwd project's terminal and never runs rex", async () => {
