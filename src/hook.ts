@@ -254,7 +254,7 @@ async function registerLeadMessagingSocket(actorId: string): Promise<void> {
   let socket = isAbsolute(raw) && !raw.includes("\0") ? raw : "";
   let pid = "";
   if (socket !== "" && pane !== "") {
-    const { panePidForRecord } = await import("./tmux.js");
+    const { panePidForRecord } = await import("./terminal.js");
     pid = panePidForRecord(pane);
   }
   if (pid === "") socket = "";

@@ -13,7 +13,7 @@ import { parseTags } from "./result.js";
 import { ACTIVE_TIMER_WHERE } from "./wakeSql.js";
 import { reportsAgentStateLog } from "./stateProvenance.js";
 import { gitOut } from "./git.js";
-import { liveTargets, rowOwnership, type AliveSnapshot } from "./tmux.js";
+import { type AliveSnapshot } from "./tmux.js"; import { liveTargets, rowOwnership } from "./terminal.js";
 import {
   SKILL_TOOL,
   lastComponent,

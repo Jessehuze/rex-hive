@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { storeDir } from "./dataDir.js";
 import { db } from "./db.js";
 import { LEAD_KIND } from "./agentKinds.js";
-import { rowOwnership } from "./tmux.js";
+import { rowOwnership } from "./terminal.js";
 import { recordQueenRefusal, type QueenWriteIdentity } from "./queenAuditStore.js";
 import { gitOut } from "./git.js";
 

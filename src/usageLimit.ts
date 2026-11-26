@@ -8,7 +8,7 @@ import { harnessFor } from "./harnesses.js";
 import { awaitingFirstPrompt } from "./firstPrompt.js";
 import { readHandoffGate } from "./leadHandoffState.js";
 import { PANE_LEASE_SETTLE_MS, releasePaneLease, tryAcquirePaneLease } from "./leaseStore.js";
-import { capturePane, liveTargets, paneInCopyMode, rowOwnership, sendText, sleep } from "./tmux.js";
+import { sleep } from "./tmux.js"; import { capturePane, liveTargets, paneInCopyMode, rowOwnership, sendText } from "./terminal.js";
 
 const UNKNOWN_RESET_MS = 6 * 60 * 60 * 1000;
 const RESET_GRACE_MS = 60 * 1000;

@@ -4,17 +4,17 @@ import { db } from "./db.js";
 import { loadProjectYml } from "./projectYml.js";
 import { closeAgentRow, currentOwnership, killAgentPane, paneIdentity, relayoutAfterPaneLeft } from "./spawn.js";
 import {
-  cancelCopyMode,
-  observeRowOwnership,
-  paneProcessExited,
   paneVisibility,
   paneWindow,
   projectWindows,
-  rowLive,
-  sessionName,
-  tmux,
+  sessionName, tmux,
   type RowOwnership,
-} from "./tmux.js";
+} from "./tmux.js"; import {
+  cancelCopyMode,
+  observeRowOwnership,
+  paneProcessExited,
+  rowLive,
+} from "./terminal.js";
 
 // One derivation for every surface that reports where a project's processes are: `hive status`,
 // `hive doctor`, and the dashboard. Two tmux window lookups per project, then one per running

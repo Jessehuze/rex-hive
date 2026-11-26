@@ -1,6 +1,6 @@
 import { db } from "./db.js";
 import { LEAD_KIND } from "./agentKinds.js";
-import { observationFailed, observeRowOwnership, ownershipLiveness, rowOwnership, type AliveSnapshot, type Liveness, type RowOwnership } from "./tmux.js";
+import { observationFailed, ownershipLiveness, type AliveSnapshot, type Liveness, type RowOwnership } from "./tmux.js"; import { observeRowOwnership, rowOwnership } from "./terminal.js";
 
 export interface AgentRow {
   id: number;

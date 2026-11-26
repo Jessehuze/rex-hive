@@ -1,16 +1,16 @@
 import type { ContextRecordKind } from "./transcript.js";
 import {
-  claudeTrailerView,
-  codexInputBoxState,
-  codexTrailerView,
-  codexPaneChoiceCheck,
   codexPaneHasInputBox,
-  inputBoxSnapshot, inputBoxState,
-  paneChoiceCheck,
   paneHasInputBox,
   type InputBoxSnapshot, type InputBoxState,
   type TrailerView,
-} from "./tmux.js";
+} from "./tmux.js"; import {
+  claudeTrailerView,
+  codexInputBoxState, codexTrailerView,
+  codexPaneChoiceCheck,
+  inputBoxSnapshot, inputBoxState,
+  paneChoiceCheck,
+} from "./terminal.js";
 
 export interface WorkerArgsInput {
   displayName?: string;

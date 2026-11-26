@@ -30,13 +30,13 @@ import { observeUsageLimit, usageLimitGate } from "./usageLimit.js";
 import { PANE_LEASE_SETTLE_MS, releasePaneLease, tryAcquirePaneLease } from "./leaseStore.js";
 import {
   holdsHumanInput,
+  sleep,
+  TmuxTimeoutError, type AliveSnapshot,
+  type RowPaneIdentity,
+} from "./tmux.js"; import {
   paneInCopyMode,
   sendText,
-  sleep,
-  TmuxTimeoutError,
-  type AliveSnapshot,
-  type RowPaneIdentity,
-} from "./tmux.js";
+} from "./terminal.js";
 import type { AgentRow } from "./agentRecords.js";
 
 type Method = MessageMethod;
