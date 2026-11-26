@@ -5,13 +5,16 @@ export {
   AUTO_ATTACH_MODES,
   isAttachMode,
   isAutoAttach,
+  isTerminal,
   migrateLegacyConfig,
+  TERMINALS,
   type AttachMode,
   type AutoAttach,
   type ConfigSource,
+  type Terminal,
 } from "./globalConfig.js";
 
-import type { AttachMode, AutoAttach, ConfigSource } from "./globalConfig.js";
+import type { AttachMode, AutoAttach, ConfigSource, Terminal } from "./globalConfig.js";
 
 export function resolvedAttachMode(): { mode: AttachMode; source: ConfigSource } {
   const global = readGlobalConfig();
@@ -37,4 +40,8 @@ export function setAttachMode(mode: AttachMode): void {
 
 export function setAutoAttach(value: AutoAttach): void {
   writeGlobalConfigKey("autoAttach", value);
+}
+
+export function setTerminal(value: Terminal): void {
+  writeGlobalConfigKey("terminal", value);
 }

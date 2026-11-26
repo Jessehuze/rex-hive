@@ -26,6 +26,12 @@ placement: split              # optional placement for workers and visible proce
                               # (panes, default) or window (tabs)
 layout: main-vertical         # optional pane arrangement for split: tiled (default),
                               # main-vertical, main-horizontal, even-horizontal, even-vertical
+terminal: tmux                # optional; tmux (default) or rex. Read when a lead starts;
+                              # HIVE_TERMINAL beats it, and it beats the global value set by
+                              # `hive setup --terminal`. Workers, processes and handoff
+                              # successors keep their lead's terminal. Rex is not available
+                              # in this build: a lead resolved to it refuses to start.
+workers: shown                # optional; shown (default) or hidden: how new workers start
 agents: [claude, codex]       # optional allowed harness set for spawned crew; first entry is
                               # the default. Absent or empty means claude only, and agent_spawn
                               # REFUSES a harness or command outside this list. lead: above is a
@@ -55,6 +61,7 @@ processes:
     command: npx tsc --watch --preserveWatchOutput
     dir: ./packages/api       # relative to the project root
     auto_start: false         # start manually with: hive start typecheck
+    wait_for_port: 3000       # optional; a port from 1 through 65535, or true for any port
     visible: false            # optional; default true. true follows placement: above, the
                               # same as a worker (split beside the lead, or its own window).
                               # false tiles it as a pane in one shared `<project>/processes`

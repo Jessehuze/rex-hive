@@ -20,6 +20,7 @@ import { errorMessage } from "./errors.js";
 export type ConfigSource = "env" | "project" | "global" | "built-in";
 export type AttachMode = "auto" | "raw" | "control";
 export type AutoAttach = "auto" | "on" | "off";
+export type Terminal = "tmux" | "rex";
 
 export interface ConfigMigrationResult {
   migrated: boolean;
@@ -29,6 +30,11 @@ export interface ConfigMigrationResult {
 
 export const ATTACH_MODES: readonly AttachMode[] = ["auto", "raw", "control"];
 export const AUTO_ATTACH_MODES: readonly AutoAttach[] = ["auto", "on", "off"];
+export const TERMINALS: readonly Terminal[] = ["tmux", "rex"];
+
+export function isTerminal(value: unknown): value is Terminal {
+  return TERMINALS.includes(value as Terminal);
+}
 
 export function isAttachMode(value: unknown): value is AttachMode {
   return ATTACH_MODES.includes(value as AttachMode);
@@ -163,7 +169,10 @@ function updateGlobalDocument(dir: string, update: (document: ReturnType<typeof 
   return true;
 }
 
-export function writeGlobalConfigKey(key: "attach" | "autoAttach", value: AttachMode | AutoAttach): void {
+export function writeGlobalConfigKey(
+  key: "attach" | "autoAttach" | "terminal",
+  value: AttachMode | AutoAttach | Terminal,
+): void {
   const dir = storeDir();
   updateGlobalDocument(dir, (document) => {
     document.set(key, value);

@@ -9,11 +9,13 @@ import { isWindowLayout, WINDOW_LAYOUTS, type WindowLayout } from "./tmux.js";
 import {
   globalConfigPath,
   isEmptyYamlDocument,
+  isTerminal,
   readGlobalConfig,
   resolveAttachSetting,
   type AttachMode,
   type AutoAttach,
   type ConfigSource,
+  type Terminal,
 } from "./globalConfig.js";
 
 export { type ConfigSource } from "./globalConfig.js";
@@ -24,12 +26,15 @@ export interface YmlProcess {
   auto_start: boolean;
   visible: boolean;
   env: Record<string, string>;
+  wait_for_port?: number | true | null;
 }
 
 export interface ProjectYml {
   lead: string | null;
   placement: "split" | "window" | null;
   layout: WindowLayout | null;
+  terminal: Terminal | null;
+  workers: "shown" | "hidden" | null;
 
   profile: string | null;
 
@@ -59,6 +64,8 @@ export const BUILT_IN_PROJECT_YML: Readonly<ProjectYml> = Object.freeze({
   lead: null,
   placement: null,
   layout: null,
+  terminal: null,
+  workers: null,
   profile: null,
   agents: null,
   lead_branches: null,
@@ -151,7 +158,7 @@ export interface ResolvedHiveConfig {
   autoAttach: { value: AutoAttach; source: ConfigSource };
 }
 
-type NullableField = "lead" | "placement" | "layout" | "profile" | "context_checkpoint_percent";
+type NullableField = "lead" | "placement" | "layout" | "terminal" | "workers" | "profile" | "context_checkpoint_percent";
 
 function isMapping(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
@@ -208,6 +215,12 @@ function parseProcesses(value: unknown, path: string, warnings: string[]): Recor
       if (typeof item.visible === "boolean") visible = item.visible;
       else warnings.push(`${path}: Process "${name}": visible must be true or false; ignoring "${String(item.visible)}".`);
     }
+    let waitForPort: number | true | null = null;
+    if (item.wait_for_port != null) {
+      const port = item.wait_for_port;
+      if (port === true || (typeof port === "number" && Number.isInteger(port) && port >= 1 && port <= 65535)) waitForPort = port;
+      else warnings.push(`${path}: Process "${name}": wait_for_port must be a port from 1 through 65535, or true; ignoring "${String(port)}".`);
+    }
     const env: Record<string, string> = {};
     if (isMapping(item.env)) {
       for (const [key, envValue] of Object.entries(item.env)) env[key] = String(envValue);
@@ -218,6 +231,7 @@ function parseProcesses(value: unknown, path: string, warnings: string[]): Recor
       auto_start: item.auto_start !== false,
       visible,
       env,
+      ...(waitForPort === null ? {} : { wait_for_port: waitForPort }),
     };
   }
   return processes;
@@ -256,6 +270,11 @@ function applyLayer(
     (value) => `placement must be "split" or "window"; ignoring "${String(value)}".`);
   assignNullable("layout", (value) => isWindowLayout(value) ? value : undefined,
     (value) => `layout must be one of ${WINDOW_LAYOUTS.join(", ")}; ignoring "${String(value)}".`);
+  const terminalMessage = (value: unknown) => `terminal must be "tmux" or "rex"; ignoring "${String(value)}".`;
+  if (source === "project") assignNullable("terminal", (value) => isTerminal(value) ? value : undefined, terminalMessage);
+  else if (has("terminal") && root.terminal != null && !isTerminal(root.terminal)) warn(terminalMessage(root.terminal));
+  assignNullable("workers", (value) => value === "shown" || value === "hidden" ? value : undefined,
+    (value) => `workers must be "shown" or "hidden"; ignoring "${String(value)}".`);
   assignNullable("profile", (value) => {
     const name = String(value).trim();
     return name !== "" && (name === NO_PROFILE || isValidProfileName(name)) ? name : undefined;

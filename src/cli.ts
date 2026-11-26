@@ -29,10 +29,14 @@ import {
   AutoAttach,
   isAttachMode,
   isAutoAttach,
+  isTerminal,
   migrateLegacyConfig,
   resolvedAutoAttach,
   setAttachMode,
   setAutoAttach,
+  setTerminal,
+  type Terminal,
+  TERMINALS,
 } from "./config.js";
 import {
   cliPath,
@@ -187,6 +191,7 @@ import {
   resolveAttachTarget,
   resolveInTmuxTarget,
   rowLive,
+  resolveTerminal,
   rowOwnership,
   serverEnvironment,
   sessionClients,
@@ -199,6 +204,7 @@ import {
   waitForPaneEstablished,
   windowLayout,
 } from "./terminal.js";
+import { RexNotImplemented, startLead as startRexLead } from "./terminal/rex.js";
 import { collectCrew, crewStoreProblem } from "./crew.js";
 import { resumeWorker, validateResumeWorker } from "./agentResume.js";
 import { markWorkerLost } from "./workerRecovery.js";
@@ -328,6 +334,8 @@ Usage:
   hive setup [--dir <dir>]   write a \`hive\` that runs the interpreter this build
                              was compiled for; re-run after every update
   hive setup --attach <mode> auto|raw|control: whether tmux attaches carry -CC
+  hive setup --terminal <t>  tmux|rex: the terminal a new lead starts in;
+                             HIVE_TERMINAL and a project's hive.yml win over it
   hive doctor [--strict] [--verbose]
                              check the environment and clean up stale state;
                              --strict also exits non-zero on warnings that mean
@@ -724,6 +732,38 @@ function reportMigrationResult(result: ReturnType<typeof migrateLegacyConfig>): 
   for (const warning of result.warnings) console.error(`! ${warning}`);
 }
 
+let terminalWarningsShown = false;
+
+function resolveTerminalAndWarn(config: { terminal: Terminal | null } | null): ReturnType<typeof resolveTerminal> {
+  const warnings: string[] = [];
+  const resolved = resolveTerminal(config, warnings);
+  if (!terminalWarningsShown) for (const w of warnings) console.error(`! ${w}`);
+  if (warnings.length > 0) terminalWarningsShown = true;
+  return resolved;
+}
+
+function refuseRexLead(config: { terminal: Terminal | null } | null): void {
+  if (resolveTerminalAndWarn(config).terminal !== "rex") return;
+  try {
+    startRexLead();
+  } catch (e) {
+    if (!(e instanceof RexNotImplemented)) throw e;
+    console.error(`hive lead: ${e.message}`);
+    process.exit(1);
+  }
+}
+
+function unregisteredLeadRoot(path?: string): string | null {
+  try {
+    if (process.env.HIVE_PROJECT_LOCK === "1" && process.env.HIVE_AGENT_ID) return null;
+    const dir = realpathSync(path ?? process.cwd());
+    if (findProjectForDir(dir)) return null;
+    return gitPrimaryRoot(dir) ?? dir;
+  } catch {
+    return null;
+  }
+}
+
 async function cmdLead(argv: string[]): Promise<void> {
   const parsed = parseArgs(argv, { flags: ["--no-dashboard", "--detach"] });
   rejectUnknownFlags("lead", parsed, "--no-dashboard and --detach");
@@ -731,6 +771,8 @@ async function cmdLead(argv: string[]): Promise<void> {
   const detach = parsed.flags.has("--detach");
   const path = parsed.positional[0];
 
+  const previewRoot = unregisteredLeadRoot(path);
+  if (previewRoot !== null) refuseRexLead(loadProjectYml(previewRoot).config);
   let registrationNotice: string | null = null;
   try {
     const project = resolveProjectForWrite("hive lead", path, (text) => {
@@ -740,6 +782,7 @@ async function cmdLead(argv: string[]): Promise<void> {
     // Only rows running before this invocation began are leftovers, trust prompts included; a later `hive start` is not.
     const leftoverIds = new Set(runningCommandRows(project.id).map((row) => row.id));
     const { config, warnings, sources } = loadProjectYml(project.path);
+    if (previewRoot !== project.path) refuseRexLead(config);
     if (detach && (!process.stdin.isTTY || !process.stdout.isTTY)) {
       let untrusted: string | undefined;
       if (config?.lead && !isTrusted(project.id, "lead", config.lead, null, {})) untrusted = "lead";
@@ -1130,6 +1173,15 @@ async function cmdQueen(argv: string[]): Promise<void> {
         "inside the data dir; move it away and run hive queen again.",
     );
   }
+  const existingYml = join(home, "hive.yml");
+  const ymlIsFile = existing?.isDirectory() === true && (() => {
+    try {
+      return lstatSync(existingYml).isFile();
+    } catch {
+      return false;
+    }
+  })();
+  refuseRexLead(ymlIsFile ? loadProjectYml(home).config : null);
   mkdirSync(home, { recursive: true });
   publishQueenYml(home);
   const queen = addProject(home, "queen");
@@ -1151,6 +1203,10 @@ const HIVE_YML_TEMPLATE = `# hive project config. Read by \`hive lead\` from the
                                 # main-* gives the lead half the window.
 
 # lead: claude --model opus     # custom command for the lead window (default: claude)
+
+# terminal: tmux                # tmux (default) | rex; HIVE_TERMINAL overrides it.
+                                # read when a lead starts; its workers keep the lead's terminal
+# workers: shown                # shown (default) | hidden: how new workers start
 
 # agents: [claude, codex]       # crew harness pool; the first entry is the default
 
@@ -1192,6 +1248,7 @@ const HIVE_YML_TEMPLATE = `# hive project config. Read by \`hive lead\` from the
 #     command: npx tsc --watch --preserveWatchOutput
 #     dir: ./packages/api       # relative to the project root
 #     auto_start: false         # start manually with: hive start typecheck
+#     wait_for_port: 3000       # hive start waits for this port; true waits for any
 #     visible: false            # tile it in one <project>/processes window instead of
 #                               # following placement: above; hive show/hide move it (default true)
 #     env:
@@ -2381,8 +2438,8 @@ function cmdUpgrade(argv: string[]): void {
 }
 
 function cmdSetup(argv: string[]): void {
-  const parsed = parseArgs(argv, { flags: ["--force"], valued: ["--dir", "--attach", "--auto-attach"] });
-  rejectUnknownFlags("setup", parsed, "--dir, --attach, --auto-attach, --force");
+  const parsed = parseArgs(argv, { flags: ["--force"], valued: ["--dir", "--attach", "--auto-attach", "--terminal"] });
+  rejectUnknownFlags("setup", parsed, "--dir, --attach, --auto-attach, --force. Also --terminal tmux|rex");
   requireFlagValues("setup", parsed);
 
   const dir = parsed.values.has("--dir") ? resolve(parsed.values.get("--dir") ?? "") : dispatcherDir();
@@ -2410,6 +2467,16 @@ function cmdSetup(argv: string[]): void {
       process.exit(1);
     }
     autoAttachArg = autoAttachValue;
+  }
+
+  const terminalValue = parsed.values.get("--terminal");
+  let terminalArg: Terminal | undefined;
+  if (parsed.values.has("--terminal")) {
+    if (!isTerminal(terminalValue)) {
+      console.log(`--terminal must be one of: ${TERMINALS.join(", ")} (got ${terminalValue ?? "nothing"})`);
+      process.exit(1);
+    }
+    terminalArg = terminalValue;
   }
 
   const existing = readDispatcher(file);
@@ -2459,8 +2526,11 @@ function cmdSetup(argv: string[]): void {
 
   if (attachArg) setAttachMode(attachArg);
   if (autoAttachArg) setAutoAttach(autoAttachArg);
+  if (terminalArg) setTerminal(terminalArg);
   console.log(`\nattach mode  ${attachMode()}`);
   console.log(`auto-attach  ${resolvedAutoAttach().value}`);
+  const terminal = resolveTerminalAndWarn(null);
+  console.log(`terminal     ${terminal.terminal} (source: ${terminal.source})`);
   if (attachArg === "raw") {
     console.log("\nRecommended ~/.tmux.conf setting for raw attach mode:");
     for (const line of RAW_ATTACH_TMUX_CONFIG) console.log(`  ${line}`);
@@ -3039,6 +3109,13 @@ function reportStalledWorkers(projectId: number): void {
 function reportEffectiveConfig(loaded: ResolvedHiveConfig): void {
   const config = loaded.config ?? BUILT_IN_PROJECT_YML;
   for (const key of PROJECT_YML_KEYS) {
+    if (key === "terminal") {
+      const terminalWarnings: string[] = [];
+      const resolved = resolveTerminal(config, terminalWarnings);
+      for (const w of terminalWarnings) warn("config terminal", w);
+      info("config terminal", `${JSON.stringify(resolved.terminal)} (source: ${resolved.source})`);
+      continue;
+    }
     info(`config ${key}`, `${JSON.stringify(config[key])} (source: ${loaded.sources[key] ?? "built-in"})`);
   }
   const varKeys = new Set(Object.keys(config.vars));

@@ -1,5 +1,8 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { isTerminal, readGlobalConfig, type Terminal } from "./globalConfig.js";
 import { tmux, tmuxSocketPath, tmuxWithClientPath } from "./tmux.js";
+
+export type { Terminal } from "./globalConfig.js";
 
 export {
   sendText,
@@ -157,3 +160,21 @@ export const isRexTarget = (target: string): boolean => target.startsWith("block
 export const isRexSocket = (socket: string): boolean => socket.startsWith("rex:");
 
 export const rexServerOf = (socket: string): string => socket.replace(/^rex:/, "");
+
+export type TerminalSource = "env" | "project" | "global" | "default";
+
+export function resolveTerminal(
+  project: { terminal: Terminal | null } | null,
+  warnings?: string[],
+): { terminal: Terminal; source: TerminalSource } {
+  const env = process.env.HIVE_TERMINAL;
+  if (isTerminal(env)) return { terminal: env, source: "env" };
+  if (env) warnings?.push(`HIVE_TERMINAL: terminal must be "tmux" or "rex"; ignoring "${env}".`);
+  if (project?.terminal) return { terminal: project.terminal, source: "project" };
+  const global = readGlobalConfig().root?.terminal;
+  if (isTerminal(global)) return { terminal: global, source: "global" };
+  return { terminal: "tmux", source: "default" };
+}
+
+export const terminalOfRow = (row: { tmux_target: string; tmux_socket: string }): Terminal =>
+  isRexTarget(row.tmux_target ?? "") || isRexSocket(row.tmux_socket ?? "") ? "rex" : "tmux";
