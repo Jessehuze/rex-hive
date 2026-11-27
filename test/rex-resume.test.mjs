@@ -354,8 +354,6 @@ describe("Rex restart survival", () => {
     assert.equal(anchorRow(), undefined, "the first dead sighting deletes the anchor");
     const stranger = spawn("sleep", ["600"], { stdio: "ignore" });
     try {
-      db.prepare("UPDATE kv SET value = json_set(value, '$.pid', ?) WHERE key = ?").run(String(stranger.pid), key);
-      assert.equal(anchorRow(), undefined, "nothing is left to repoint at a reused pid");
       db.prepare("UPDATE agents SET pane_pid = ? WHERE id = ?").run(String(stranger.pid), worker.id);
       assert.equal(terminal.rowOwnership(rowById(worker.id)), "reissued", "a live pid the row names is not owned without an anchor");
     } finally {

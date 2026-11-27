@@ -29,8 +29,9 @@ layout: main-vertical         # optional pane arrangement for split: tiled (defa
 terminal: tmux                # optional; tmux (default) or rex. Read when a lead starts;
                               # HIVE_TERMINAL beats it, and it beats the global value set by
                               # `hive setup --terminal`. Workers, processes and handoff
-                              # successors keep their lead's terminal. Rex is not available
-                              # in this build: a lead resolved to it refuses to start.
+                              # successors keep their lead's terminal. A lead resolved to Rex
+                              # refuses to start when rex is missing, its server is down, or the
+                              # server is too old; see docs/tmux.md#rex.
 workers: shown                # optional; shown (default) or hidden: how new workers start
 agents: [claude, codex]       # optional allowed harness set for spawned crew; first entry is
                               # the default. Absent or empty means claude only, and agent_spawn

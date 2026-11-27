@@ -208,7 +208,7 @@ import {
   waitForPaneEstablished,
   windowLayout,
 } from "./terminal.js";
-import { commandArgv, envFromFlags, REX_LAUNCH_VERB, rexClose, rexCannotTell, rexCreatePane, rexFocus, rexHideBlock, rexLayoutProject, rexPeekBlock, rexProjectLead, rexRefuseQuickExit, rexShowBlock, rexShownAs, rexVisibility } from "./terminal/rex.js";
+import { commandArgv, envFromFlags, REX_LAUNCH_VERB, rexClose, rexCannotTell, rexCreatePane, rexFocus, rexHideBlock, rexLayoutProject, rexPeekBlock, rexProjectLead, rexRefuseLead, rexRefuseQuickExit, rexShowBlock, rexShownAs, rexVisibility } from "./terminal/rex.js"; import { rexDoctorSection } from "./rexDoctor.js";
 import { collectCrew, crewStoreProblem } from "./crew.js";
 import { resumeWorker, validateResumeWorker } from "./agentResume.js";
 import { markWorkerLost } from "./workerRecovery.js";
@@ -769,7 +769,7 @@ function rexLeadPane(project: Project, previous: RowPaneIdentity, envFlags: stri
     return { leadPane: previous.tmux_target, leadWindow: "", createdPane: false, leadSocket: previous.tmux_socket, leadPid: "" };
   }
   try {
-    const placed = withWindowClaim(() => rexCreatePane({
+    rexRefuseLead(); const placed = withWindowClaim(() => rexCreatePane({
       projectId: project.id, projectName: project.name, label: `${project.name}/lead`, cwd: project.path,
       env: envFromFlags(envFlags), argv: commandArgv(launchCommand), placement: "lead", retainOnExit: false, agentId,
     }));
@@ -3392,7 +3392,7 @@ function cmdDoctor(argv: string[]): void {
     return [describeAbi(status), status.addon].join("\n        ");
   });
 
-  check("tmux", () => {
+  const tmuxChecks = rexDoctorSection({ check, warn, info }); if (tmuxChecks) check("tmux", () => {
     let version: string;
     try {
       version = terminalVersion();
@@ -3404,7 +3404,7 @@ function cmdDoctor(argv: string[]): void {
     const override = tmuxTimeoutOverride();
     return override === null ? version : `${version} (HIVE_TMUX_TIMEOUT_MS=${override}ms override; testing only)`;
   });
-  try {
+  if (tmuxChecks) try {
     const serverEnv = serverEnvironment("NO_COLOR");
     if (serverEnv.startsWith("NO_COLOR=")) {
       warn(
@@ -3422,9 +3422,9 @@ function cmdDoctor(argv: string[]): void {
       );
     }
   }
-  const orphans = orphanScratchServers();
+  const orphans = tmuxChecks ? orphanScratchServers() : null;
   reportPtyHeadroom(orphans);
-  reportOrphanTmuxServers(orphans);
+  if (tmuxChecks) reportOrphanTmuxServers(orphans);
   check("claude", () => {
     try {
       return execFileSync("which", ["claude"], { encoding: "utf8" }).trim();
@@ -3832,8 +3832,8 @@ function cmdDoctor(argv: string[]): void {
       return { sessions: [], answered: tmuxSaysNothingThere(e) };
     }
   };
-  const { sessions: allSessions, answered: tmuxAnswered } = hiveSessions();
-  if (!tmuxAnswered) {
+  const { sessions: allSessions, answered: tmuxAnswered } = tmuxChecks ? hiveSessions() : { sessions: [], answered: true };
+  if (tmuxChecks && !tmuxAnswered) {
 
     warn(
       "tmux server",
@@ -3845,13 +3845,13 @@ function cmdDoctor(argv: string[]): void {
         "list-sessions` to confirm it is unreachable.",
     );
   }
-  check("sessions", () => {
+  if (tmuxChecks) check("sessions", () => {
     if (!tmuxAnswered) return "unknown - tmux did not answer";
     const base = allSessions.filter((s) => !isViewSessionName(s));
     return base.length > 0 ? base.join(", ") : "none running";
   });
 
-  check("window stamps", () => {
+  if (tmuxChecks) check("window stamps", () => {
     const session = sessionName();
 
     if (!tmuxAnswered) return "unknown - tmux did not answer";
@@ -3905,7 +3905,7 @@ function cmdDoctor(argv: string[]): void {
   });
   {
     const { mode } = loaded.attach;
-    if (mode === "raw") {
+    if (tmuxChecks && mode === "raw") {
       try {
         const owned = listWindowOwnership()
           .trim()

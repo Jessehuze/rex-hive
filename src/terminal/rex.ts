@@ -8,6 +8,7 @@ import {
   rexKey,
   rexCallerBlock,
   rexLua,
+  rexWhoami,
   SNAPSHOT_SCRIPT,
 } from "../rexCli.js";
 import {
@@ -41,6 +42,8 @@ const sql = (): RexStore => {
 };
 
 export const REX_UNREACHABLE_GRACE_MS = 600_000;
+export const REX_MIN_API_REVISION = 24;
+export const REX_WAY_BACK = "Run with HIVE_TERMINAL=tmux to use tmux instead.";
 export const REX_UNREACHABLE_STALE_MS = 120_000;
 export const REX_BLOB_MAX_BYTES = 983_040;
 export const unreachableSinceKey = (server: string): string => `terminal:rex:unreachable-since:${server}`;
@@ -1020,14 +1023,72 @@ export function rexRespawn(
   return { target, pid: placed.pid };
 }
 
-export function rexUnownedBlocks(server?: string | null): { block: string; label: string }[] | null {
-  const snap = rexSnapshot(server);
+export function rexUnownedIn(snap: RexSnapshot | null): { block: string; label: string }[] | null {
   if (snap === null || !snap.answered || snap.incomplete) return null;
   const owned = new Set(ownedBlocks(rexSocketOf(snap.server)));
   const names = (sql().prepare("SELECT name FROM projects").all() as { name: string }[]).map((p) => `${p.name}/`);
   return [...snap.blocks]
     .filter(([id, b]) => !owned.has(id) && names.some((n) => b.label.startsWith(n)))
     .map(([block, b]) => ({ block, label: b.label }));
+}
+
+export const rexUnownedBlocks = (server?: string | null): { block: string; label: string }[] | null => rexUnownedIn(rexSnapshot(server));
+
+export function rexRelabel(target: string, label: string, server?: string): void {
+  bestEffort(() => {
+    const resolved = requireServer(target, server);
+    rexApi(resolved, "session.set_block_label", { session_id: rexSessionOf(resolved, target), block_id: target, label });
+  });
+}
+
+export type RexHealth =
+  | { ok: true; endpoint: string; version: string; revision: number }
+  | { ok: false; problem: "missing" | "unreachable" | "old" | "failed"; message: string; endpoint?: string; version?: string; revision?: number };
+
+export const describeRexServer = (version: string, revision: number | null): string =>
+  `version ${version}, api_revision ${revision ?? "unknown"} (minimum ${REX_MIN_API_REVISION})`;
+
+export function rexHealth(): RexHealth {
+  let who;
+  try {
+    who = rexWhoami();
+  } catch (err) {
+    const problem = err instanceof RexUnavailableError ? (err.code === "ENOENT" ? "missing" : "unreachable") : "failed";
+    return { ok: false, problem, message: err instanceof Error ? err.message : String(err) };
+  }
+  if (!who.endpoint) return { ok: false, problem: "failed", message: "rex whoami named no server endpoint" };
+  if (who.revision === null || who.revision < REX_MIN_API_REVISION) {
+    return {
+      ok: false, problem: "old", endpoint: who.endpoint, version: who.version, revision: who.revision ?? undefined,
+      message: `the Rex server is too old for hive: ${describeRexServer(who.version, who.revision)}. Update Rex`,
+    };
+  }
+  return { ok: true, endpoint: who.endpoint, version: who.version, revision: who.revision };
+}
+
+export function rexRefuseLead(): void {
+  const health = rexHealth();
+  if (!health.ok) throw new Error(`hive lead cannot start on Rex: ${health.message.trim().replace(/\.$/, "")}. ${REX_WAY_BACK}`);
+}
+
+export function rexClearStaleReaps(reachable: string | null): number[] {
+  if (store === null) return [];
+  const rows = sql()
+    .prepare(`SELECT project_id, key, value FROM kv WHERE key LIKE ? AND updated_at < datetime('now', ?)`)
+    .all(`${REAP_PENDING_PREFIX}%`, `-${REX_UNREACHABLE_GRACE_MS / 1000} seconds`) as { project_id: number; key: string; value: string }[];
+  const cleared: number[] = [];
+  for (const row of rows) {
+    let pending: PendingReap;
+    try {
+      pending = JSON.parse(row.value) as PendingReap;
+    } catch {
+      continue;
+    }
+    if (pending.server === reachable) continue;
+    sql().prepare("DELETE FROM kv WHERE project_id = ? AND key = ?").run(row.project_id, row.key);
+    cleared.push(pending.agent);
+  }
+  return cleared;
 }
 
 export function rexCreatePane(spec: RexPaneSpec): RexPlaced {
