@@ -303,14 +303,12 @@ function rootStatus(block) {
 }
 
 const isBlocked = (status) => status !== null && (status.state === "blocked" || ["permission", "question", "auth"].includes(status.kind));
+const notWorking = (status) => status !== null && status.state !== "working" && !isBlocked(status);
 const isTrustDialog = (status) => isBlocked(status) && /trust/i.test(status.msg ?? "");
 
 async function acceptTrust(block) {
   if (FAKE_CLAUDE) return "trust dialog not checked (fake claude)";
-  const seen = await until(() => {
-    const status = rootStatus(block);
-    return status && (isTrustDialog(status) || status.state === "idle" || status.state === "working") ? status : null;
-  }, 60_000);
+  const seen = await until(() => rootStatus(block), 60_000);
   if (!seen) return "no program status within 60s";
   if (!isTrustDialog(seen)) return `no trust dialog (status ${seen.state})`;
   key(block, "down");
@@ -616,12 +614,16 @@ async function runSteps(paths, s) {
   }, [[lead, "step 2"]]);
 
   await step("6 a handoff", async () => {
-    fakeSkip("the lead's own Stop hooks confirming the successor");
     const old = leadRowOf(s.project.id);
+    const settledLead = await until(() => {
+      const status = rootStatus(old.tmux_target);
+      return notWorking(status) ? status : null;
+    }, 300_000, 2000);
+    check(settledLead, `the lead was still working or blocked after 300s (status ${JSON.stringify(rootStatus(old.tmux_target))})`);
+    note(`lead not working: program status ${settledLead.state}`);
+    fakeSkip("the lead's own Stop hooks confirming the successor");
     const content = mods.handoff.HANDOFF_HEADINGS.map((h) => `${h}\nnone: this is the hive live Rex check`).join("\n\n");
     const pad = await ctx.mcp.call("pad_write", { name: mods.handoff.HANDOFF_PAD_NAME, content });
-    const idle = await until(() => rootStatus(old.tmux_target)?.state === "idle", 300_000, 2000);
-    check(idle, "the lead never went idle within 300s");
     typeText(old.tmux_target, "!");
     await sleep(800);
     typeText(old.tmux_target, `${q(process.execPath)} ${q(CLI)} lead-handoff --pad ${pad.pad_id} --revision ${pad.revision}`);
