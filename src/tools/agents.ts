@@ -2,7 +2,7 @@ import { existsSync, rmSync, statSync, realpathSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { db } from "../db.js";
+import { db } from "../db.js"; import { rexRetileClosed, rexRetileProbe } from "../rexRetile.js";
 import { CLOSED_ROW_ORDER, findAgent, getAgentRow, liveSuccessorHint, notOwnedError, observeOwnership, probeFailed, PROBE_FAILED_NOTE, REISSUED_PANE_NOTE, summaryLiveness, UNVERIFIED_OWNERSHIP_NOTE, type AgentRow } from "../agentRecords.js";
 export { CLOSED_ROW_ORDER, findAgent, getAgentRow, notOwnedError, observeOwnership, probeFailed, PROBE_FAILED_NOTE, REISSUED_PANE_NOTE, summaryLiveness, UNVERIFIED_OWNERSHIP_NOTE, type AgentRow } from "../agentRecords.js";
 
@@ -1307,7 +1307,7 @@ export function registerAgents(server: McpServer): void {
         if (agent.kind === "agent" && !markWorkerRetirementIntent(agent.id, paneIdentity(agent))) {
           throw new Error(`Agent ${agent.id} changed before its park intent was recorded. Nothing was changed.`);
         }
-        const window = live ? paneWindow(agent.tmux_target) : null;
+        const window = live ? paneWindow(agent.tmux_target) : null; const rexRetile = live ? rexRetileProbe(agent.tmux_target) : null;
         if (db.inTransaction) {
           throw new Error("agent_park must hold the outermost transaction; a nested SAVEPOINT loses write-lock exclusion.");
         }
@@ -1316,7 +1316,7 @@ export function registerAgents(server: McpServer): void {
           if (live) killAgentPaneWithoutRelayout(agent.tmux_target);
           return parkAgentRowWithLeases(agent.id, paneIdentity(agent), branch);
         }).immediate();
-        if (live) relayoutAfterPaneLeft(window);
+        if (live) relayoutAfterPaneLeft(window); rexRetileClosed(rexRetile);
         const parkedAt = parked.parked_at;
         if (parkedAt === undefined) {
 

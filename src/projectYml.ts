@@ -272,7 +272,7 @@ function applyLayer(
     (value) => `placement must be "split" or "window"; ignoring "${String(value)}".`);
   assignNullable("layout", (value) => isWindowLayout(value) ? value : undefined,
     (value) => `layout must be one of ${WINDOW_LAYOUTS.join(", ")}; ignoring "${String(value)}".`);
-  const terminalMessage = (value: unknown) => `terminal must be "tmux" or "rex"; ignoring "${String(value)}".`; if (source === "project") assignNullable("terminal", (value) => isTerminal(value) ? value : undefined, terminalMessage); else if (has("terminal") && root.terminal != null && !isTerminal(root.terminal)) warn(terminalMessage(root.terminal));
+  applyTerminalKey(source, has("terminal"), root.terminal, assignNullable, warn);
   assignNullable("workers", (value) => value === "shown" || value === "hidden" ? value : undefined, (value) => `workers must be "shown" or "hidden"; ignoring "${String(value)}".`);
   assignNullable("retile", (value) => typeof value === "boolean" ? value : undefined, (value) => `retile must be true or false; ignoring "${String(value)}".`);
   assignNullable("profile", (value) => {
@@ -497,4 +497,12 @@ export function resolveCommandDir(projectPath: string, dir: string | null): stri
     throw new Error(`dir "${dir}" escapes the project root`);
   }
   return resolved;
+}
+
+type AssignNullable = (key: NullableField, valid: (value: unknown) => unknown, message: (value: unknown) => string) => void;
+
+function applyTerminalKey(source: "global" | "project", present: boolean, value: unknown, assign: AssignNullable, warn: (message: string) => void): void {
+  const message = (bad: unknown) => `terminal must be "tmux" or "rex"; ignoring "${String(bad)}".`;
+  if (source === "project") assign("terminal", (v) => (isTerminal(v) ? v : undefined), message);
+  else if (present && value != null && !isTerminal(value)) warn(message(value));
 }

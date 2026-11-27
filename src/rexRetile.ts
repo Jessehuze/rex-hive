@@ -1,9 +1,7 @@
 import { db } from "./db.js";
 import { loadProjectYml, type ConfigSource } from "./projectYml.js";
 import { DEFAULT_LAYOUT, type WindowLayout } from "./tmux.js";
-import { rexHideBlock, rexProjectLead, rexRetileTab, rexShowBlock, rexTiledInTab, type RexShownAs } from "./terminal/rex.js";
-
-type Anchor = { tmux_target: string; tmux_socket: string };
+import { rexProjectLead, rexRetileTab, rexTiledInTab } from "./terminal/rex.js";
 
 export function rexRetileSetting(projectPath: string): { on: boolean; source: ConfigSource } {
   const loaded = loadProjectYml(projectPath);
@@ -19,6 +17,7 @@ const projectPath = (projectId: number): string | null =>
   (db.prepare("SELECT path FROM projects WHERE id = ?").get(projectId) as { path: string } | undefined)?.path ?? null;
 
 function attempt(run: () => unknown): boolean {
+  if (db.inTransaction) return false;
   try {
     return run() != null;
   } catch {
@@ -26,41 +25,40 @@ function attempt(run: () => unknown): boolean {
   }
 }
 
+function retileProject(projectId: number, layoutOverride?: WindowLayout, extra: string[] = []): unknown {
+  const path = projectPath(projectId);
+  const lead = rexProjectLead(projectId);
+  if (!path || !lead) return null;
+  const { on, layout } = settings(path);
+  return on ? rexRetileTab(lead, layoutOverride ?? layout, extra) : null;
+}
+
 export function rexRetileAfterPlace(
-  spec: { projectPath: string; layout?: WindowLayout; placement: string; hidden: boolean },
-  anchor: Anchor,
+  spec: { projectId: number; layout?: WindowLayout; placement: string; hidden: boolean },
   target: string,
 ): boolean {
   if (spec.placement !== "split" || spec.hidden) return false;
-  return attempt(() => {
-    const { on, layout } = settings(spec.projectPath);
-    return on ? rexRetileTab(anchor, spec.layout ?? layout, [target]) : null;
-  });
+  return attempt(() => retileProject(spec.projectId, spec.layout, [target]));
 }
 
-function retileProject(projectId: number): void {
-  attempt(() => {
-    const path = projectPath(projectId);
-    const lead = rexProjectLead(projectId);
-    if (!path || !lead) return null;
-    const { on, layout } = settings(path);
-    return on ? rexRetileTab(lead, layout) : null;
-  });
-}
+const pending = new Set<number>();
 
-export function rexShowRetiled(projectId: number, name: string, target: string, placement: RexShownAs, windowLabel: string): string {
-  const line = rexShowBlock(projectId, name, target, placement, windowLabel);
-  if (line.endsWith(": shown")) retileProject(projectId);
+export function rexRetileVisibility(projectId: number, line: string, now = true): string {
+  if (!line.endsWith(": shown") && !line.endsWith(": hidden")) return line;
+  if (now) attempt(() => retileProject(projectId));
+  else pending.add(projectId);
   return line;
 }
 
-export function rexHideRetiled(projectId: number, name: string, target: string, remember = false): string {
-  const line = rexHideBlock(projectId, name, target, remember);
-  if (line.endsWith(": hidden")) retileProject(projectId);
-  return line;
+export function rexRetilePending(): void {
+  for (const projectId of [...pending]) {
+    pending.delete(projectId);
+    attempt(() => retileProject(projectId));
+  }
 }
 
-function closingInLeadSplit(target: string): number | null {
+export function rexRetileProbe(target: string): number | null {
+  if (!target.startsWith("block:")) return null;
   try {
     const row = db.prepare("SELECT project_id FROM agents WHERE tmux_target = ? AND status = 'running' AND kind != 'lead' ORDER BY id DESC LIMIT 1")
       .get(target) as { project_id: number } | undefined;
@@ -72,9 +70,13 @@ function closingInLeadSplit(target: string): number | null {
   }
 }
 
-export function rexCloseRetiled<T>(target: string, close: () => T, claim: (run: () => void) => void): T {
-  const projectId = closingInLeadSplit(target);
+export function rexRetileClosed(projectId: number | null): void {
+  if (projectId !== null) attempt(() => retileProject(projectId));
+}
+
+export function rexCloseRetiled<T>(target: string, close: () => T): T {
+  const projectId = rexRetileProbe(target);
   const result = close();
-  if (projectId !== null && !db.inTransaction) attempt(() => claim(() => retileProject(projectId)));
+  rexRetileClosed(projectId);
   return result;
 }

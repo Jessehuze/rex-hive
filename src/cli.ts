@@ -208,7 +208,7 @@ import {
   waitForPaneEstablished,
   windowLayout,
 } from "./terminal.js";
-import { commandArgv, envFromFlags, rexClose, rexCannotTell, rexCreatePane, rexFocus, rexLayoutProject, rexPeekBlock, rexProjectLead, rexRefuseLead, rexRefuseQuickExit, rexShownAs, rexVisibility } from "./terminal/rex.js"; import { rexDoctorSection } from "./rexDoctor.js"; import { rexHideRetiled, rexShowRetiled } from "./rexRetile.js";
+import { commandArgv, envFromFlags, rexClose, rexCannotTell, rexCreatePane, rexFocus, rexHideBlock, rexLayoutProject, rexPeekBlock, rexProjectLead, rexRefuseLead, rexRefuseQuickExit, rexShowBlock, rexShownAs, rexVisibility } from "./terminal/rex.js"; import { rexDoctorSection } from "./rexDoctor.js"; import { rexRetilePending, rexRetileVisibility } from "./rexRetile.js";
 import { collectCrew, crewStoreProblem } from "./crew.js";
 import { resumeWorker, validateResumeWorker } from "./agentResume.js";
 import { markWorkerLost } from "./workerRecovery.js";
@@ -2070,12 +2070,12 @@ function resolveVisibilityTarget(parsed: ParsedArgs, verb: VisibilityVerb): Visi
 const configuredPlacement = (config: ProjectYml | null): "split" | "window" =>
   config?.placement ?? (process.env.HIVE_SPAWN_PLACEMENT === "window" ? "window" : "split");
 
-function showWorker(hit: VisibilityHit): string {
+function showWorker(hit: VisibilityHit, retileNow = true): string {
   const placement = rexShownAs(hit.project.id, hit.target) ?? configuredPlacement(hit.config);
-  return withWindowClaim(() => rexShowRetiled(hit.project.id, hit.name, hit.target, placement, `${hit.project.name}/${hit.name}`));
+  return rexRetileVisibility(hit.project.id, withWindowClaim(() => rexShowBlock(hit.project.id, hit.name, hit.target, placement, `${hit.project.name}/${hit.name}`)), retileNow);
 }
 
-const hideWorker = (hit: VisibilityHit): string => withWindowClaim(() => rexHideRetiled(hit.project.id, hit.name, hit.target, true));
+const hideWorker = (hit: VisibilityHit, retileNow = true): string => rexRetileVisibility(hit.project.id, withWindowClaim(() => rexHideBlock(hit.project.id, hit.name, hit.target, true)), retileNow);
 
 function visibilityCommand(argv: string[], verb: "show" | "hide"): VisibilityHit | null {
   const parsed = parseArgs(argv, { flags: ["--all"] });
@@ -2089,13 +2089,13 @@ function visibilityCommand(argv: string[], verb: "show" | "hide"): VisibilityHit
     if (!target) continue;
     const hit = { project, name: row.name, config, target, worker: true };
     try {
-      console.log(verb === "show" ? showWorker(hit) : hideWorker(hit));
+      console.log(verb === "show" ? showWorker(hit, false) : hideWorker(hit, false));
     } catch (e) {
       console.log(`${row.name}: ${errorMessage(e)}`);
       process.exitCode = 1;
     }
   }
-  return null;
+  rexRetilePending(); return null;
 }
 
 function cmdPeek(argv: string[]): void {
@@ -2282,7 +2282,7 @@ function cmdShow(argv: string[]): void {
   if (found.worker) return console.log(showWorker(found));
   const { project, name, target } = found;
   const config = found.config!;
-  if (isRexTarget(target)) return console.log(withWindowClaim(() => rexShowRetiled(project.id, name, target, config.placement ?? "split", `${project.name}/${name}`)));
+  if (isRexTarget(target)) return console.log(rexRetileVisibility(project.id, withWindowClaim(() => rexShowBlock(project.id, name, target, config.placement ?? "split", `${project.name}/${name}`))));
   const session = sessionName();
 
   // Read the window inside the claim, never before it: tmux destroys a window when its last pane
@@ -2308,7 +2308,7 @@ function cmdHide(argv: string[]): void {
   if (!found) return;
   if (found.worker) return console.log(hideWorker(found));
   const { project, name, target } = found;
-  if (isRexTarget(target)) return console.log(withWindowClaim(() => rexHideRetiled(project.id, name, target)));
+  if (isRexTarget(target)) return console.log(rexRetileVisibility(project.id, withWindowClaim(() => rexHideBlock(project.id, name, target))));
   const session = sessionName();
 
   // One claim over the whole decision: the group window comes and goes with its last pane, so both

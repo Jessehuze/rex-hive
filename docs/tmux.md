@@ -161,20 +161,21 @@ Rex session
 
 - **The home tab.** hive records each project's tab. If Rex says that tab still exists, it is the home, wherever it now lives. Otherwise hive creates it, in the session of the calling block when `hive` runs inside Rex, and otherwise in a session labelled with hive's session name (`homeSession`, `src/terminal/rex.ts:940`). hive never renames a session it did not create.
 - **Labels.** Blocks are labelled `<project>/lead`, `<project>/<worker>` or `<project>/<process>`. Labels are for people; the store is the source of truth. `agent_rename` relabels the worker's block (`rexRelabel`, `src/terminal/rex.ts:1073`).
-- **Re-tiling, on by default.** After each change to the lead's tab, hive re-applies the configured `layout` (default `tiled`) to the lead block and the hive-owned, live, non-floating blocks already in that tab, so the crew stays an even grid the way tmux's `select-layout` keeps it (`rexRetileTab`, `src/terminal/rex.ts:1689`). The changes are: a split worker spawned, resumed or forked, a visible process started, `hive show`, `hive hide`, and `agent_close` or `hive stop` of a split block. The maintainer turned this on by default on 2026-11-27.
+- **Re-tiling, on by default.** After each change to the lead's tab, hive re-applies the configured `layout` (default `tiled`) to the lead block and the hive-owned, live, non-floating blocks already in that tab, so the crew stays an even grid the way tmux's `select-layout` keeps it (`rexRetileTab`, `src/terminal/rex.ts:1695`). The changes are: a split worker spawned, resumed or forked, a visible process started, `hive show`, `hive hide` (once per `--all`), and `agent_close`, `agent_park` or `hive stop` of a split block. The maintainer turned this on by default on 2026-11-27.
+  - It always arranges around the project's lead block, and only while that block is live. A block that lands outside the lead's tab, such as a sub-worker split beside a `placement: window` worker, re-tiles nothing, and neither does its close.
   - It never pulls a `placement: window` worker or process into the lead's tab, never touches a hidden (floating) block, and never touches another tab.
   - A block in the lead's tab that hive does not own is left out of the arrangement, so it may be displaced as the blocks around it move.
-  - It is best-effort: a failed re-tile never fails the spawn or close it follows. The scheduler and janitor never re-tile, so a row the janitor closes is re-tiled by the next change or by `hive layout`.
+  - It is best-effort: a failed re-tile never fails the spawn or close it follows. It runs after the store's write lock is released, and stops issuing calls once 3 seconds have passed, leaving the rest of the arrangement for the next change. The scheduler, the janitor and the lead's own end (its processes stopped by SessionEnd or a lead pane exit) never re-tile, so a row closed that way is re-tiled by the next change or by `hive layout`.
   - `retile: false` in the project or global `hive.yml` turns it off: hive then never moves or resizes a block outside `hive layout`, and a new split takes space from the lead block only. tmux ignores the key.
   - `hive layout` still rebuilds the tab on demand, gathering live split blocks from every tab (`rexApplyLayout`, `src/terminal/rex.ts:1478`).
-- **Focus.** `hive attach`, `hive lead` and `hive next` focus the lead block, then ask a connected Rex app to switch to its session. With Remote Control off, or no app answering, hive prints the session and tab to open (`rexFocus`, `src/terminal/rex.ts:1649`). There are no view sessions and no `-CC`; `hive lead --detach` focuses nothing.
+- **Focus.** `hive attach`, `hive lead` and `hive next` focus the lead block, then ask a connected Rex app to switch to its session. With Remote Control off, or no app answering, hive prints the session and tab to open (`rexFocus`, `src/terminal/rex.ts:1651`). There are no view sessions and no `-CC`; `hive lead --detach` focuses nothing.
 
 ### Hide, show and peek
 
 - `workers: hidden` in `hive.yml` starts new workers hidden; absent means `shown`.
 - `hive hide <worker>` floats a worker as a minimized layer in the lead's tab. It keeps running and receiving wakes, and Rex's working and blocked marks still show it (`rexFloatHidden`, `src/terminal/rex.ts:1279`). A hidden `placement: window` worker floats in the lead's tab too.
 - `hive show <worker>` moves it back into the lead's split, or into a new tab for `placement: window` (`rexUnfloat`, `src/terminal/rex.ts:1306`).
-- `hive peek <worker>` restores the float over the lead and focuses it, without moving it into the split; `hive hide` minimizes it again (`rexPeekBlock`, `src/terminal/rex.ts:1670`).
+- `hive peek <worker>` restores the float over the lead and focuses it, without moving it into the split; `hive hide` minimizes it again (`rexPeekBlock`, `src/terminal/rex.ts:1672`).
 - `--all` covers every running worker and no process. On tmux, hiding a worker is refused.
 
 ### Restart survival
@@ -194,7 +195,7 @@ After a restart, Rex restores blocks and re-runs each program's registered resum
 | Line | Means |
 |---|---|
 | `terminal: rex (from <source>)` | the effective terminal and which rule above chose it |
-| `retile: on\|off (<source>)` | whether hive re-tiles the lead's tab (above), and whether `built-in`, `global` or `project` set it (`rexRetileSetting`, `src/rexRetile.ts:8`) |
+| `retile: on\|off (<source>)` | whether hive re-tiles the lead's tab (above), and whether `built-in`, `global` or `project` set it (`rexRetileSetting`, `src/rexRetile.ts:6`) |
 | `rex: <path>` | where `rex` resolves on PATH; FAIL when it does not |
 | `rex server: reachable, version V, api_revision N (minimum M)` | from `rex whoami --json`; FAIL when unreachable, warn when N is below M |
 | `rex blocks: K owned, G rows gone, O orphan blocks` | rows whose block is open, rows whose block is gone, and blocks labelled `<project>/…` with no row, each named with the `rex block close` command to clear it |

@@ -1475,16 +1475,18 @@ export function rexLayoutPlan(lead: string, blocks: string[], layout: WindowLayo
   return plan;
 }
 
-export function rexApplyLayout(window: { lead: string; blocks: string[]; server?: string }, layout: WindowLayout): RexLayoutPlan {
+export function rexApplyLayout(window: { lead: string; blocks: string[]; server?: string }, layout: WindowLayout, deadline = Infinity): RexLayoutPlan {
   const resolved = requireServer(window.lead, window.server);
   const session = rexSessionOf(resolved, window.lead);
   const plan = rexLayoutPlan(window.lead, window.blocks, layout);
   for (const move of plan.moves) {
+    if (Date.now() > deadline) return plan;
     rexApi(resolved, "session.move_block", {
       session_id: session, block_id: move.block, anchor_block_id: move.anchor, direction: move.direction, side: "after",
     });
   }
   for (const resize of plan.resizes) {
+    if (Date.now() > deadline) return plan;
     rexApi(resolved, "session.resize_pane", {
       session_id: session, direction: resize.direction, before_block_id: resize.before, after_block_id: resize.after, ratio: resize.ratio,
     });
@@ -1686,26 +1688,32 @@ export function rexTiledInTab(anchor: { tmux_target: string; tmux_socket: string
   return !!home && !!mine && !mine.floating && mine.window === home.window;
 }
 
-export function rexRetileTab(anchor: { tmux_target: string; tmux_socket: string }, layout: WindowLayout, extra: string[] = []): RexLayoutPlan | null {
-  const server = rowServer(anchor.tmux_socket, anchor.tmux_target);
+export const REX_RETILE_BUDGET_MS = 3000;
+
+export type RexLeadRow = { tmux_target: string; tmux_socket: string; pane_pid: string; command: string };
+
+export function rexRetileTab(lead: RexLeadRow, layout: WindowLayout, extra: string[] = [], deadline = Date.now() + REX_RETILE_BUDGET_MS): RexLayoutPlan | null {
+  if (store?.inTransaction) return null;
+  const server = rowServer(lead.tmux_socket, lead.tmux_target);
   if (!server) return null;
-  const rows = (sql()
+  const rows = sql()
     .prepare(
       `SELECT name, kind, tmux_target, tmux_socket, pane_pid, command FROM agents
         WHERE kind != 'lead' AND status = 'running' AND tmux_target LIKE 'block:%' AND tmux_socket = ? AND tmux_target != ? ORDER BY id`,
     )
-    .all(anchor.tmux_socket, anchor.tmux_target) as ProjectBlockRow[]);
-  const snap = rexSnapshot(server, [...rows.map((r) => r.tmux_target), ...extra]);
-  if (snap === null || !snap.answered) return null;
-  const view = sessionView(server, rexSessionOf(server, anchor.tmux_target));
-  const home = placeOf(view, anchor.tmux_target);
+    .all(lead.tmux_socket, lead.tmux_target) as ProjectBlockRow[];
+  const snap = rexSnapshot(server, [lead.tmux_target, ...rows.map((r) => r.tmux_target), ...extra]);
+  if (snap === null || !snap.answered || rexOwnership(lead, snap) !== "live" || Date.now() > deadline) return null;
+  const view = sessionView(server, rexSessionOf(server, lead.tmux_target));
+  const home = placeOf(view, lead.tmux_target);
   if (!home || home.floating) return null;
   const inTab = (block: string): boolean => {
     const where = placeOf(view, block);
     return !!where && !where.floating && where.window === home.window;
   };
+  if (!extra.every(inTab)) return null;
   const owned = rows.filter((r) => rexOwnership(r, snap) === "live").map((r) => r.tmux_target);
-  const blocks = [...new Set([...owned, ...extra])].filter((b) => b !== anchor.tmux_target && inTab(b));
+  const blocks = [...new Set([...owned, ...extra])].filter(inTab);
   if (blocks.length === 0) return null;
-  return rexApplyLayout({ lead: anchor.tmux_target, blocks, server }, layout);
+  return rexApplyLayout({ lead: lead.tmux_target, blocks, server }, layout, deadline);
 }

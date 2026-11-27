@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 
@@ -79,6 +79,21 @@ async function startLead(dir) {
   clients.push(mcp);
   await mcp.start();
   return { project, lead, mcp };
+}
+
+async function mcpAs(dir, actor, env = {}) {
+  const mcp = new McpClient({ cwd: dir, dataDir: dirs.dataDir, env: withClaude({ HIVE_AGENT_ID: actor, HIVE_SPAWN_READY_MS: "300", ...env }) });
+  clients.push(mcp);
+  await mcp.start();
+  return mcp;
+}
+
+async function waitForCall(since, method) {
+  const deadline = Date.now() + 30_000;
+  while (!apiCalls(since).some((c) => c.method === method)) {
+    if (Date.now() > deadline) throw new Error(`${method} never started`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
 }
 
 const spawn = (mcp, name, extra = {}) => mcp.call("agent_spawn", { name, command: fakeClaude("sleep 600"), placement: "split", ...extra });
@@ -240,6 +255,132 @@ describe("retile on Rex (on by default)", () => {
     const row = db.prepare("SELECT status, tmux_target FROM agents WHERE project_id = ? AND name = 'fail-2'").get(project.id);
     assert.equal(row.status, "running");
     assert.equal(row.tmux_target, spawned.tmux_target);
+  });
+
+  it("a split worker spawning a sub-worker re-tiles around the project lead, never around the worker", async () => {
+    const dir = freshProject("retile-sub-split");
+    const { lead, mcp } = await startLead(dir);
+    const w1 = await spawn(mcp, "sw1");
+    const w2 = await spawn(mcp, "sw2");
+    const sub = await mcpAs(dir, db.prepare("SELECT actor_id FROM agents WHERE id = ?").get(w1.agent_id).actor_id);
+    const mark = realCalls().length;
+    const s1 = await spawn(sub, "ss1");
+    assert.deepEqual(asPlan(layoutCalls(mark)), planCalls(lead.tmux_target, [w1.tmux_target, w2.tmux_target, s1.tmux_target], "tiled"));
+  });
+
+  it("a placement: window worker spawning and closing a sub-worker issues zero move_block and resize_pane calls", async () => {
+    const dir = freshProject("retile-sub-window");
+    const { mcp } = await startLead(dir);
+    await spawn(mcp, "tw-a");
+    const tab = await spawn(mcp, "tw-tab", { placement: "window" });
+    const sub = await mcpAs(dir, db.prepare("SELECT actor_id FROM agents WHERE id = ?").get(tab.agent_id).actor_id);
+    const mark = realCalls().length;
+    const s1 = await spawn(sub, "tw-s1");
+    assert.notEqual(windowOf(s1.tmux_target), null, "the sub-worker was placed");
+    await mcp.call("agent_close", { name: "tw-s1" });
+    assert.equal(fake.state().blocks[s1.tmux_target], undefined, "the control: the close happened");
+    assert.deepEqual(layoutCalls(mark), []);
+  });
+
+  it("a re-tile holds no store write lock: with move_block delayed 7s, another server's kv_set succeeds within 3s", async () => {
+    const dir = freshProject("retile-lock");
+    const { lead, mcp } = await startLead(dir);
+    await spawn(mcp, "lk-a");
+    const slow = await mcpAs(dir, lead.actor_id, { FAKE_REX_SLEEP_ON: "session.move_block:7000" });
+    const mark = realCalls().length;
+    const spawning = spawn(slow, "lk-b").then((r) => ({ ok: r }), (e) => ({ err: String(e) }));
+    await waitForCall(mark, "session.move_block");
+    const started = Date.now();
+    const write = await mcp.call("kv_set", { key: "retile-probe", value: "1" }).then(() => "ok", (e) => String(e));
+    assert.equal(write, "ok");
+    assert.ok(Date.now() - started < 3000, `kv_set took ${Date.now() - started}ms`);
+    assert.ok((await spawning).ok, "the spawn itself still succeeds");
+  });
+
+  it("a re-tile stops issuing calls once its time budget is spent: with move_block taking 1.5s, a five-worker grid makes fewer moves than its plan", async () => {
+    const dir = freshProject("retile-budget");
+    const { lead, mcp } = await startLead(dir);
+    const workers = [];
+    for (const name of ["bd1", "bd2", "bd3", "bd4"]) workers.push((await spawn(mcp, name)).tmux_target);
+    const slow = await mcpAs(dir, lead.actor_id, { FAKE_REX_SLEEP_ON: "session.move_block:1500" });
+    const mark = realCalls().length;
+    const fifth = await spawn(slow, "bd5");
+    const planned = planCalls(lead.tmux_target, [...workers, fifth.tmux_target], "tiled").filter((c) => c.method === "session.move_block").length;
+    const moves = layoutCalls(mark).filter((c) => c.method === "session.move_block").length;
+    assert.ok(moves >= 1, "the re-tile started");
+    assert.ok(moves < planned, `made ${moves} of ${planned} planned moves`);
+  });
+
+  it("the lead's own end stops its processes without re-tiling", async () => {
+    const dir = freshProject("retile-lead-end");
+    const { project, lead, mcp } = await startLead(dir);
+    await spawn(mcp, "le-a");
+    await seedTrustedYml({ db, projectId: project.id, projectDir: dir, processes: { web: "sleep 600" } });
+    assert.equal((await cli(["start", "web"], dir)).code, 0);
+    const web = processRow(project.id, "web");
+    const mark = realCalls().length;
+    assert.equal((await cli(["lead-pane-exited", lead.tmux_target], dir)).code, 0);
+    assert.equal(processRow(project.id, "web").status, "closed", "the control: the lead's end stopped the process");
+    assert.equal(fake.state().blocks[web.tmux_target], undefined);
+    assert.deepEqual(layoutCalls(mark), []);
+  });
+
+  it("agent_park of a split worker re-tiles the workers left", async () => {
+    const dir = freshProject("retile-park");
+    const { lead, mcp } = await startLead(dir);
+    const a = await spawn(mcp, "pk-a");
+    await spawn(mcp, "pk-b");
+    const c = await spawn(mcp, "pk-c");
+    const mark = realCalls().length;
+    await mcp.call("agent_park", { name: "pk-b" });
+    assert.deepEqual(asPlan(layoutCalls(mark)), planCalls(lead.tmux_target, [a.tmux_target, c.tmux_target], "tiled"));
+  });
+
+  it("show --all unfloats every worker first and re-tiles once at the end", async () => {
+    const dir = freshProject("retile-all");
+    const { lead, mcp } = await startLead(dir);
+    const ws = [];
+    for (const name of ["al-a", "al-b", "al-c"]) ws.push((await spawn(mcp, name)).tmux_target);
+    assert.equal((await cli(["hide", "--all"], dir)).code, 0);
+    const mark = realCalls().length;
+    const shown = await cli(["show", "--all"], dir);
+    assert.equal(shown.code, 0, shown.stdout + shown.stderr);
+    const unfloats = ws.map((b) => ({ method: "session.move_block", block: b, anchor: lead.tmux_target, direction: "horizontal" }));
+    assert.deepEqual(asPlan(layoutCalls(mark)), [...unfloats, ...planCalls(lead.tmux_target, ws, "tiled")]);
+  });
+
+  it("closing a window worker or a hidden worker issues zero layout calls while a split worker shares the lead's tab", async () => {
+    const dir = freshProject("retile-close-excluded");
+    const { mcp } = await startLead(dir);
+    await spawn(mcp, "ce-split");
+    const tab = await spawn(mcp, "ce-tab", { placement: "window" });
+    writeFileSync(join(dir, "hive.yml"), "workers: hidden\n");
+    const hidden = await spawn(mcp, "ce-hidden");
+    const mark = realCalls().length;
+    await mcp.call("agent_close", { name: "ce-tab" });
+    await mcp.call("agent_close", { name: "ce-hidden" });
+    assert.equal(fake.state().blocks[tab.tmux_target], undefined, "the control: the window worker closed");
+    assert.equal(fake.state().blocks[hidden.tmux_target], undefined, "the control: the hidden worker closed");
+    assert.deepEqual(layoutCalls(mark), []);
+  });
+
+  it("with retile: false, hive hide and hive stop make no layout calls and hive show makes only its unfloat move", async () => {
+    const dir = freshProject("retile-off-visibility");
+    const { project, lead, mcp } = await startLead(dir);
+    const a = await spawn(mcp, "of-a");
+    await spawn(mcp, "of-b");
+    await seedTrustedYml({ db, projectId: project.id, projectDir: dir, processes: { web: "sleep 600" } });
+    appendFileSync(join(dir, "hive.yml"), "retile: false\n");
+    assert.equal((await cli(["start", "web"], dir)).code, 0);
+    let mark = realCalls().length;
+    assert.match((await cli(["hide", "of-a"], dir)).stdout, /of-a: hidden/);
+    assert.deepEqual(layoutCalls(mark), [], "hide");
+    mark = realCalls().length;
+    assert.match((await cli(["show", "of-a"], dir)).stdout, /of-a: shown/);
+    assert.deepEqual(asPlan(layoutCalls(mark)), [{ method: "session.move_block", block: a.tmux_target, anchor: lead.tmux_target, direction: "horizontal" }], "show");
+    mark = realCalls().length;
+    assert.match((await cli(["stop", "web"], dir)).stdout, /web: stopped/);
+    assert.deepEqual(layoutCalls(mark), [], "stop");
   });
 
   it("hive doctor shows retile on (built-in) by default and off (project) when hive.yml sets it false", async () => {
