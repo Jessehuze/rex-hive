@@ -152,6 +152,13 @@ class Mcp {
     this.next = 1;
     this.pending = new Map();
     let buffer = "";
+    const failAll = (err) => {
+      for (const resolve of this.pending.values()) resolve({ error: { message: `the MCP server failed: ${err.message}` } });
+      this.pending.clear();
+    };
+    this.child.on("error", failAll);
+    this.child.stdin.on("error", failAll);
+    this.child.on("exit", (code, signal) => failAll(new Error(`it exited (${signal ?? code})`)));
     this.child.stdout.setEncoding("utf8");
     this.child.stdout.on("data", (chunk) => {
       buffer += chunk;
@@ -182,6 +189,12 @@ class Mcp {
         clearTimeout(timer);
         resolve(msg);
       });
+      if (this.child.exitCode !== null || this.child.signalCode !== null || !this.child.stdin.writable) {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        reject(new Error(`MCP ${method}: the server is not running`));
+        return;
+      }
       this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
     });
   }
@@ -214,7 +227,26 @@ const ctx = {
   cleaned: false,
 };
 
+function adoptExpectedSessions() {
+  if (!endpoint || !ctx.leadLabel) return [];
+  const beforeIds = new Set(ctx.before.map((x) => x.session_id));
+  let listed = [];
+  try {
+    listed = listSessions();
+  } catch {
+    return [];
+  }
+  const found = listed.filter((x) => !beforeIds.has(x.session_id) && (x.label === ctx.leadLabel || x.label === ctx.liveLabel));
+  for (const x of found) if (!ctx.created.has(x.session_id)) ctx.created.set(x.session_id, x.label);
+  return found;
+}
+
+function survivors() {
+  return adoptExpectedSessions().map((x) => `${x.label} ${x.session_id}`);
+}
+
 function destroyCreated() {
+  adoptExpectedSessions();
   const beforeIds = new Set(ctx.before.map((s) => s.session_id));
   const killed = [];
   for (const [id, label] of ctx.created) {
@@ -222,7 +254,7 @@ function destroyCreated() {
       note(`NOT destroying ${label} (${id}): it existed before this run`);
       continue;
     }
-    if (label !== ctx.liveLabel && !label.startsWith("hive-")) {
+    if (label !== ctx.liveLabel && label !== ctx.leadLabel) {
       note(`NOT destroying ${label} (${id}): unexpected label`);
       continue;
     }
@@ -250,8 +282,18 @@ function cleanup() {
   ctx.mcp?.kill();
   killScratchTmux();
   if (ctx.kept) return;
+  adoptExpectedSessions();
   const killed = destroyCreated();
   if (killed.length > 0) note(`destroyed in cleanup: ${killed.join(", ")}`);
+}
+
+for (const event of ["uncaughtException", "unhandledRejection"]) {
+  process.on(event, (err) => {
+    console.error(`\n${event}: ${err instanceof Error ? err.stack : String(err)}`);
+    console.log("cleaning up the sessions this run created");
+    cleanup();
+    process.exit(1);
+  });
 }
 
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
@@ -393,10 +435,13 @@ async function mainRun() {
   }
   endpoint = who.endpoint;
   mods.rexCli = await load("rexCli.js");
+  ctx.leadLabel = (await load("tmux.js")).sessionName();
+  if (existsSync(RESTART_STATE)) note(`an armed restart phase is waiting in ${RESTART_STATE}; finish it with --restart-verify, or kill its sessions with rex kill <id> and delete the file`);
   console.log(`server ${endpoint}, rex ${who.rex_version ?? "?"}, api_revision ${who.api_revision ?? "?"}`);
   ctx.before = listSessions();
-  if (ctx.before.some((s) => s.label === LIVE_LABEL)) {
-    console.error(`refusing: a session labelled ${LIVE_LABEL} already exists`);
+  const clash = ctx.before.find((x) => x.label === LIVE_LABEL || x.label === ctx.leadLabel);
+  if (clash) {
+    console.error(`refusing: a session labelled ${clash.label} already exists`);
     return 1;
   }
   console.log(`sessions before: ${ctx.before.length}`);
@@ -410,7 +455,7 @@ async function mainRun() {
       const left = (() => {
         try {
           const ids = new Set(listSessions().map((x) => x.session_id));
-          return [...ctx.created.keys()].filter((id) => ids.has(id));
+          return [...new Set([...[...ctx.created.keys()].filter((id) => ids.has(id)), ...survivors()])];
         } catch {
           return ["(could not list)"];
         }
@@ -466,6 +511,18 @@ function afterDestroy() {
   console.log("     Please glance at the Rex app: your own sessions, tabs and focus should be as you left them.");
 }
 
+function probeCommand(paths) {
+  const script = [
+    `await import(${JSON.stringify(pathToFileURL(join(DIST, "rexInUse.js")).href)});`,
+    `const { callerSocket } = await import(${JSON.stringify(pathToFileURL(join(DIST, "terminal.js")).href)});`,
+    "const { writeFileSync } = await import('node:fs');",
+    "writeFileSync(process.argv[1], JSON.stringify({ callerSocket: callerSocket(), REX_SERVER: process.env.REX_SERVER ?? null }));",
+    "setInterval(() => {}, 1 << 30);",
+  ].join("\n");
+  const wait = 'go=$1; shift; while [ ! -e "$go" ]; do /bin/sleep 0.2; done; exec "$@"';
+  return ["/bin/sh", "-c", wait, "probe", `${paths.probe}.go`, "/usr/bin/env", `HIVE_DATA_DIR=${paths.dataDir}`, "HIVE_TERMINAL=rex", "HIVE_NO_UPDATE_CHECK=1", process.execPath, "--input-type=module", "-e", script, paths.probe];
+}
+
 async function runSteps(paths, s) {
   await step("1 create the session", () => {
     const reply = api("session.create", {
@@ -477,7 +534,7 @@ async function runSteps(paths, s) {
             block: {
               flavor: SHELL_FLAVOR,
               label: "hive-live/probe",
-              options: { shell: "none", login: false, cwd: paths.base, command: ["/bin/sh", "-c", 'printf "%s" "$REX_SERVER" > "$1"; exec /bin/sleep 3600', "probe", paths.probe], exit: { on_completion: false } },
+              options: { shell: "none", login: false, cwd: paths.base, command: probeCommand(paths), exit: { on_completion: false } },
             },
           },
         },
@@ -493,7 +550,12 @@ async function runSteps(paths, s) {
   s.ok1 = !!s.liveSession;
   const lead = await step("2 hive lead --detach", async () => {
     check(hive(["init", "--no-profile"], { cwd: paths.proj }).code === 0, "hive init failed");
-    const started = hive(["lead", paths.proj, "--detach"], { cwd: paths.proj });
+    let started;
+    try {
+      started = hive(["lead", paths.proj, "--detach"], { cwd: paths.proj });
+    } finally {
+      adoptExpectedSessions();
+    }
     check(started.code === 0, `hive lead exited ${started.code}: ${started.out.trim().slice(-600)}`);
     const pane = /LEAD_PANE=(block:\S+)/.exec(started.out)?.[1];
     check(pane, `no LEAD_PANE=block:... in: ${started.out.trim().slice(-400)}`);
@@ -506,6 +568,7 @@ async function runSteps(paths, s) {
     const session = sessionOf(pane);
     if (ctx.before.some((x) => x.session_id === session)) throw new Error(`the lead landed in a session that existed before this run (${session})`);
     const label = listSessions().find((x) => x.session_id === session)?.label ?? "";
+    check(label === ctx.leadLabel, `the lead landed in session ${JSON.stringify(label)} (${session}), not hive's expected ${ctx.leadLabel}`);
     if (!ctx.created.has(session)) ctx.created.set(session, label);
     s.leadSession = session;
     s.leadWindow = viewPlace(pane)?.window ?? "";
@@ -514,11 +577,13 @@ async function runSteps(paths, s) {
   }, [[s.ok1, "step 1"]]);
 
   await step("2a socket strings match byte for byte", async () => {
-    const probe = await until(() => existsSync(paths.probe) && readFileSync(paths.probe, "utf8"), 10_000, 200);
-    check(probe, "the probe block never wrote REX_SERVER");
-    const caller = `rex:${probe}`;
+    writeFileSync(`${paths.probe}.go`, "");
+    const probe = await until(() => existsSync(paths.probe) && JSON.parse(readFileSync(paths.probe, "utf8")), 15_000, 200);
+    check(probe, "the probe block never reported callerSocket()");
+    const caller = probe.callerSocket;
     const recorded = s.lead.tmux_socket;
-    note(`callerSocket (REX_SERVER in a block): ${JSON.stringify(caller)}`);
+    note(`REX_SERVER in the probe block:        ${JSON.stringify(probe.REX_SERVER)}`);
+    note(`callerSocket() in the probe block:    ${JSON.stringify(caller)}`);
     note(`lead row socket (from rex whoami):    ${JSON.stringify(recorded)}`);
     note(`whoami endpoint:                      ${JSON.stringify(`rex:${endpoint}`)}`);
     check(caller === recorded, "callerSocket() and the recorded socket differ");
@@ -691,7 +756,7 @@ async function runSteps(paths, s) {
     ctx.kept = true;
     s.destroyStep = false;
     const rows = mods.db.prepare("SELECT id, name, kind, tmux_target FROM agents WHERE project_id = ? AND status = 'running'").all(s.project.id);
-    writeFileSync(RESTART_STATE, JSON.stringify({ paths, endpoint, before: ctx.before, created: [...ctx.created], liveLabel: LIVE_LABEL, projectId: s.project.id, rows }, null, 2));
+    writeFileSync(RESTART_STATE, JSON.stringify({ paths, endpoint, before: ctx.before, created: [...ctx.created], liveLabel: LIVE_LABEL, leadLabel: ctx.leadLabel, projectId: s.project.id, rows }, null, 2));
     line("SKIP", "9 destroy the sessions this run created", "kept for HIVE_LIVE_RESTART");
     console.log(`
 Restart phase armed; state in ${RESTART_STATE}. Do NOT expect this script to edit init.lua.
@@ -712,6 +777,7 @@ async function restartVerify() {
   const state = JSON.parse(readFileSync(RESTART_STATE, "utf8"));
   ctx.paths = state.paths;
   ctx.liveLabel = state.liveLabel;
+  ctx.leadLabel = state.leadLabel;
   ctx.before = state.before;
   ctx.created = new Map(state.created);
   const realRex = findOnPath("rex");
@@ -721,14 +787,27 @@ async function restartVerify() {
   }
   installWrapper(state.paths.bin, state.paths.log, realRex);
   setHiveEnv(state.paths.dataDir, state.paths.tmux);
-  endpoint = state.endpoint;
   mods.rexCli = await load("rexCli.js");
+  const hint = `nothing was killed. To clean up by hand: rex kill <id> for each session you recognise in ${RESTART_STATE}, then delete that file and ${state.paths.base}`;
+  const refuse = (why) => {
+    ctx.kept = true;
+    console.error(`refusing --restart-verify: ${why}\n${hint}`);
+    return 1;
+  };
+  let who;
   try {
-    await step("R1 the Rex server answers", () => {
-      const who = whoami();
-      check(who.endpoint === state.endpoint, `whoami endpoint ${who.endpoint} is not ${state.endpoint}`);
-      return `${who.endpoint}, rex ${who.rex_version ?? "?"}`;
-    });
+    who = whoami();
+  } catch (err) {
+    return refuse(`rex whoami failed: ${String(err.stderr ?? err.message).trim()}`);
+  }
+  if (who.endpoint !== state.endpoint) return refuse(`the server is ${who.endpoint}, but the armed run used ${state.endpoint}`);
+  endpoint = state.endpoint;
+  const listedNow = new Map(listSessions().map((x) => [x.session_id, x.label]));
+  const relabelled = [...ctx.created].filter(([id, label]) => listedNow.has(id) && listedNow.get(id) !== label);
+  if (relabelled.length > 0) return refuse(relabelled.map(([id, label]) => `${id} was ${label}, now ${listedNow.get(id)}`).join("; "));
+  if (![...ctx.created.values()].every((label) => label === ctx.liveLabel || label === ctx.leadLabel)) return refuse("the state file names a session label this script never creates");
+  try {
+    line("PASS", "R1 the Rex server answers", `${who.endpoint}, rex ${who.rex_version ?? "?"}`);
     await loadDist();
     await step("R2 the sessions came back", () => {
       const ids = new Set(listSessions().map((x) => x.session_id));
@@ -766,6 +845,12 @@ function summary() {
   const count = (s) => results.filter((r) => r.status === s).length;
   console.log(`\n${count("PASS")} PASS, ${count("FAIL")} FAIL, ${count("SKIP")} SKIP`);
   if (ctx.paths) console.log(`rex call log: ${ctx.paths.log} (${readCalls(ctx.paths.log).length} calls)`);
+  if (ctx.paths && count("FAIL") === 0 && !ctx.kept) {
+    rmSync(ctx.paths.base, { recursive: true, force: true });
+    console.log(`clean run: removed the scratch dir ${ctx.paths.base}`);
+  } else if (ctx.paths) {
+    console.log(`scratch dir kept for debugging: ${ctx.paths.base}\n  remove it with: rm -rf ${q(ctx.paths.base)}`);
+  }
   return count("FAIL") > 0 ? 1 : 0;
 }
 
