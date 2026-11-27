@@ -44,7 +44,7 @@ export function loadDocs(repoRoot = REPO) {
   const candidates = [
     { name: "CLAUDE.md", path: join(repoRoot, "CLAUDE.md") },
     ...globSync("docs/*.md", { cwd: repoRoot })
-      .sort()
+      .sort().filter((name) => name !== "docs/rex.md")
       .map((name) => ({ name, path: join(repoRoot, name) })),
   ];
   return candidates.filter(({ path }) => existsSync(path)).map(({ name, path }) => ({ name, content: readFileSync(path, "utf8") }));

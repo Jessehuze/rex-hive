@@ -76,6 +76,7 @@ hive is a personal daily-driver tool, released low-key. It is single-user by des
 | [Security](docs/security.md) | What hive runs, writes and fetches on your machine, with the code to check |
 | [Tools](docs/tools.md) | The MCP tools: what each does and when to use it |
 | [tmux settings](docs/tmux.md) | Attach modes, pane options, and what to put in `~/.tmux.conf` |
+| [Rex terminal](docs/rex.md) | Running hive in Rex instead of tmux: turning it on, the layout, hide/show/peek, restart survival, doctor's Rex lines |
 | [Development](docs/development.md) | Building and testing hive itself |
 
 ## Updating

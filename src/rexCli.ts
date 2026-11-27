@@ -146,6 +146,28 @@ export function defaultRexServer(): string | null {
   return cachedServer;
 }
 
+export interface RexWhoami {
+  endpoint: string | null;
+  version: string;
+  revision: number | null;
+}
+
+export function rexWhoami(): RexWhoami {
+  const who = parseJson<{ rex_version?: unknown; api_revision?: unknown }>(rexRun(null, ["whoami", "--json"]), "whoami");
+  const endpoint = endpointOf(who);
+  if (endpoint) {
+    cachedServer = endpoint;
+    failedAt = null;
+  }
+  return {
+    endpoint,
+    version: typeof who.rex_version === "string" ? who.rex_version : "unknown",
+    revision: typeof who.api_revision === "number" ? who.api_revision : null,
+  };
+}
+
+export const rexConfigCheck = (): string => rexRun(null, ["config", "check"]);
+
 export const SNAPSHOT_SCRIPT = `-- hive:snapshot v1
 local wanted = {}
 for _, id in ipairs((rex.args or {}).blocks or {}) do wanted[id] = true end

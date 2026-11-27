@@ -949,6 +949,9 @@ function fakeOp(op, raw) {
         state.clients = args.clients ?? [];
         state.perform_error = args.perform_error ?? null;
         return {};
+      case "setServerInfo":
+        for (const key of ["api_revision", "rex_version", "resume_rules"]) if (args[key] !== undefined) state[key] = args[key];
+        return {};
       case "setPorts": {
         const block = state.blocks[args.block_id];
         const pid = block.child_pid ?? undefined;
@@ -1044,8 +1047,8 @@ function main(argv) {
         instance_id: "fake-instance",
         host_id: "fake-host",
         started_at: "2026-01-01T00:00:00Z",
-        rex_version: "0.0.0-fake",
-        api_revision: 24,
+        rex_version: state.rex_version ?? "0.0.0-fake",
+        api_revision: state.api_revision ?? 24,
         exit_empty: false,
         session_count: state.sessions.length,
         log_path: join(DIR, "fake-rex.log"),
@@ -1088,6 +1091,12 @@ function main(argv) {
     case "wait": {
       const f = flags(tail, { "--for": "for", "-s": "session", "--session": "session", "-w": "window", "--window": "window", "--json": "json?" });
       return waitFor(f._[0], f.for, f.json);
+    }
+    case "config": {
+      if (tail[0] !== "check") fail("bad_request", `the fake supports only config check, not config ${tail[0]}`);
+      const rules = [["claude", "built in", "claude --resume <uuid>"], ...(state.resume_rules ?? []).map((name, i) => [name, `init.lua:${38 + i}`, `/bin/sh -c "exec hive" hive __rex-resume <id>`])];
+      process.stdout.write(`config: ${join(DIR, "init.lua")}\nresume rules: ${rules.length}\n${rules.map(([n, at, c]) => `  ${n} (${at})\n    command: ${c}\n`).join("")}`);
+      return 0;
     }
     case "do": {
       const f = flags(tail, { "-e": "code", "--eval": "code", "--json": "json?", "-s": "session", "-b": "block", "--args": "args" });

@@ -42,7 +42,7 @@ import {
   waitForPaneEstablished,
   rowOwnership,
 } from "./terminal.js";
-import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexForgetShownAs, rexRefuseQuickExit, rexRememberShownAs } from "./terminal/rex.js";
+import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexForgetShownAs, rexRefuseQuickExit, rexRememberShownAs, rexRelabel } from "./terminal/rex.js";
 
 export function withWindowClaim<T>(claim: () => T): T {
   if (db.inTransaction) {
@@ -633,7 +633,7 @@ export function renameAgent(
     throw asNameClash(e, newName);
   }
 
-  if (projectName !== null && ownsItsWindow(agent.tmux_target, windowTitle(projectName, agent.name))) {
+  if (projectName !== null && isRexTarget(agent.tmux_target)) rexRelabel(agent.tmux_target, `${projectName}/${newName}`); else if (projectName !== null && ownsItsWindow(agent.tmux_target, windowTitle(projectName, agent.name))) {
     try {
       renameWindow(agent.tmux_target, windowTitle(projectName, newName));
     } catch {
