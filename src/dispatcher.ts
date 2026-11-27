@@ -49,6 +49,11 @@ export function readDispatcher(file: string): Dispatcher | null {
     : { file, mine: true, node: null, cli: null };
 }
 
+export function hiveCommand(): string[] {
+  const file = dispatcherPath();
+  return readDispatcher(file)?.cli === cliPath() ? [file] : [process.execPath, cliPath()];
+}
+
 const WORKTREE_PATH_FRAGMENTS = ["/.agents/worktrees/", "/.claude/worktrees/"] as const;
 
 export type WorktreePin = {

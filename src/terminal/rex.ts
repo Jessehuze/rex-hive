@@ -1,5 +1,5 @@
 import { basename } from "node:path";
-import { cliPath } from "../dispatcher.js";
+import { hiveCommand } from "../dispatcher.js";
 import { isDefaultStore, storeDir } from "../dataDir.js";
 import {
   defaultRexServer,
@@ -844,7 +844,7 @@ export function commandArgv(command: string): string[] {
 }
 
 export const REX_LAUNCH_SCRIPT = '"$0" "$1" "$2" "$3" "$$"; shift 4; unset OSC7577_TOKEN; exec "$@"';
-export const hiveInvocation = (): string[] => [process.execPath, cliPath()];
+export const hiveInvocation = (): string[] => hiveCommand();
 export const REX_RESUME_VERB = "__rex-resume";
 export const REX_RESUME_PID_ENV = "HIVE_REX_RESUME_PID";
 export const REX_RESUME_SCRIPT = `c=$(${REX_RESUME_PID_ENV}=$$ "$@" 3>&1 1>&2) && [ -n "$c" ] || c='exec "\${SHELL:-/bin/sh}"'; eval "$c"`;

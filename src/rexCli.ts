@@ -75,7 +75,7 @@ function classify(err: unknown, verb: string, killMs: number, timeoutMs: number,
   return new RexError(`rex ${verb} failed: ${stderr || code}`, code, stderr);
 }
 
-function rexRun(server: string | null, args: string[], input?: string): string {
+function rexRun(server: string | null, args: string[], input?: string, failedOutput?: { stdout: string; status: number | null }): string {
   if (process.env.NODE_TEST_CONTEXT && !process.env.FAKE_REX_STATE) {
     throw new RexError("refusing to run rex under the test runner without isolateRex()", "test-isolation", "");
   }
@@ -94,6 +94,11 @@ function rexRun(server: string | null, args: string[], input?: string): string {
       killSignal: "SIGKILL",
     });
   } catch (err) {
+    const { status, stdout } = err as ExecFailure & { stdout?: string };
+    if (failedOutput && status === 1 && stdout) {
+      failedOutput.status = 1;
+      return (failedOutput.stdout = stdout);
+    }
     throw classify(err, args[0] ?? "", killMs, timeoutMs, Date.now() - started);
   }
 }
@@ -166,7 +171,20 @@ export function rexWhoami(): RexWhoami {
   };
 }
 
-export const rexConfigCheck = (): string => rexRun(null, ["config", "check"]);
+export interface RexConfigCheck {
+  status: number;
+  report: { path?: unknown; exists?: unknown; resume_rules?: unknown; diagnostics?: unknown };
+}
+
+export function rexConfigCheck(path?: string): RexConfigCheck {
+  const failed = { stdout: "", status: null as number | null };
+  const stdout = rexRun(null, ["config", "check", ...(path ? [path] : []), "--json"], undefined, failed);
+  const report = parseJson<RexConfigCheck["report"]>(stdout, "config check");
+  if (!report || typeof report !== "object" || Array.isArray(report)) throw new RexError("rex config check printed JSON that is not an object", "bad_output", "");
+  return { status: failed.status ?? 0, report };
+}
+
+export const rexConfigReload = (): string => rexRun(null, ["config", "reload"]);
 
 export const SNAPSHOT_SCRIPT = `-- hive:snapshot v1
 local wanted = {}

@@ -9,10 +9,10 @@ import { fakeRexDo, isolateRex } from "./rex-helpers.mjs";
 
 const { hasTmux, cleanup: cleanupTmux } = isolateTmux("rex attach and queen tests");
 const dirs = scratchDirs();
-const fake = isolateRex(dirs.tmp);
 clearHiveEnv();
+const fake = isolateRex(dirs.tmp);
 process.env.HIVE_DATA_DIR = dirs.dataDir;
-const rexEnv = Object.fromEntries(Object.entries(fake.env).filter(([k]) => !k.startsWith("HIVE_")));
+const rexEnv = fake.childEnv;
 
 const { db, migrate } = await import("../dist/db.js");
 if (!db.name.startsWith(dirs.dataDir)) throw new Error(`refusing: opened ${db.name}`);

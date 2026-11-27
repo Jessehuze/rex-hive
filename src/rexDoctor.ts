@@ -4,8 +4,8 @@ import { claudeConfigDir } from "./claudeDir.js";
 import { findProjectForCwd } from "./context.js";
 import { db } from "./db.js";
 import { loadProjectYml } from "./projectYml.js";
-import { rexConfigCheck } from "./rexCli.js";
 import { REX_RESUME_RULE_NAME } from "./rexResume.js";
+import { REX_RULE_INSTALL, resumeRuleState } from "./rexResumeRule.js";
 import { resolveTerminal, type TerminalSource } from "./terminal.js";
 import {
   describeRexServer,
@@ -48,21 +48,6 @@ function onPath(name: string): string | null {
   }
   return null;
 }
-
-export function resumeRuleNames(configCheck: string): string[] {
-  const lines = configCheck.split("\n");
-  const start = lines.findIndex((line) => /^resume rules:/.test(line));
-  if (start < 0) return [];
-  const names: string[] = [];
-  for (const line of lines.slice(start + 1)) {
-    if (/^\S/.test(line)) break;
-    const rule = /^ {2}(\S+) \(/.exec(line);
-    if (rule) names.push(rule[1]!);
-  }
-  return names;
-}
-
-export const resumeRuleInstalled = (configCheck: string): boolean => resumeRuleNames(configCheck).includes(REX_RESUME_RULE_NAME);
 
 const SESSION_START_HOOK = /\brex\b[\s\S]*\bsession-start\b/;
 const NAMING_FLAG = /--(?:feature-)?session-naming(?:=|\s+)?(["']?)([^\s"']*)\1/g;
@@ -110,21 +95,14 @@ function reportBlocks(r: DoctorReport, endpoint: string): void {
 }
 
 function reportResumeRule(r: DoctorReport): void {
-  let text: string;
-  try {
-    text = rexConfigCheck();
-  } catch (err) {
-    r.warn("rex resume rule", `unknown: rex config check failed: ${err instanceof Error ? err.message : String(err)}`);
-    return;
-  }
-  if (resumeRuleInstalled(text)) r.check("rex resume rule", () => "installed");
-  else {
-    r.warn(
-      "rex resume rule",
-      "missing",
-      `no "${REX_RESUME_RULE_NAME}" resume rule is in Rex's init.lua, so after a Rex restart hive blocks come back as shells`,
-      "print the rule with: hive setup --rex-resume, append it to init.lua yourself, then run: rex config reload",
-    );
+  const rule = resumeRuleState();
+  const label = "rex resume rule";
+  if (rule.state === "current") r.check(label, () => "installed");
+  else if (rule.state === "unknown") r.warn(label, `unknown: ${rule.detail}`);
+  else if (rule.state === "missing") {
+    r.warn(label, "missing", `no "${REX_RESUME_RULE_NAME}" resume rule is in ${rule.path}, so after a Rex restart hive blocks come back as shells`, `install it with: ${REX_RULE_INSTALL}`);
+  } else {
+    r.warn(label, `stale: ${rule.detail}`, "it no longer matches the command hive records, so after a Rex restart hive blocks come back as shells", `update it with: ${REX_RULE_INSTALL}`);
   }
 }
 

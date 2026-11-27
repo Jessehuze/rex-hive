@@ -10,10 +10,10 @@ import { fakeRexDo, isolateRex, waitFor } from "./rex-helpers.mjs";
 
 const { cleanup: cleanupTmux } = isolateTmux("rex resume tests");
 const dirs = scratchDirs();
-const fake = isolateRex(dirs.tmp);
 clearHiveEnv();
+const fake = isolateRex(dirs.tmp);
 process.env.HIVE_DATA_DIR = dirs.dataDir;
-const rexEnv = Object.fromEntries(Object.entries(fake.env).filter(([k]) => !k.startsWith("HIVE_")));
+const rexEnv = fake.childEnv;
 
 const { db, migrate } = await import("../dist/db.js");
 migrate();
@@ -22,6 +22,7 @@ const terminal = await import("../dist/terminal.js");
 const { janitor } = await import("../dist/scheduler.js");
 const { REX_RESUME_SCRIPT } = await import("../dist/rexResume.js");
 const { rexApi } = await import("../dist/rexCli.js");
+const { dispatcherScript } = await import("../dist/dispatcher.js");
 
 const clients = [];
 after(async () => {
@@ -68,13 +69,13 @@ function reportsIn(block) {
 
 const rowById = (id) => db.prepare("SELECT * FROM agents WHERE id = ?").get(id);
 
-async function startProject(name) {
+async function startProject(name, extraEnv = {}) {
   const dir = mkdtempSync(join(dirname(dirs.projectDir), `${name}-`));
-  const result = await runCli(["lead", dir, "--detach"], { cwd: dir, dataDir: dirs.dataDir, tmp: dirs.tmp, env: withClaude({ HIVE_TERMINAL: "rex" }) });
+  const result = await runCli(["lead", dir, "--detach"], { cwd: dir, dataDir: dirs.dataDir, tmp: dirs.tmp, env: withClaude({ HIVE_TERMINAL: "rex", ...extraEnv }) });
   assert.equal(result.code, 0, result.stdout + result.stderr);
   const project = db.prepare("SELECT id, name, path FROM projects WHERE path = ?").get(dir);
   const lead = leadRow(db, project.id);
-  const mcp = new McpClient({ cwd: dir, dataDir: dirs.dataDir, env: withClaude({ HIVE_AGENT_ID: lead.actor_id, HIVE_SPAWN_READY_MS: "300" }) });
+  const mcp = new McpClient({ cwd: dir, dataDir: dirs.dataDir, env: withClaude({ HIVE_AGENT_ID: lead.actor_id, HIVE_SPAWN_READY_MS: "300", ...extraEnv }) });
   clients.push(mcp);
   await mcp.start();
   const workerName = `${name}-w`;
@@ -94,6 +95,22 @@ function markerShell(shellMarker) {
   writeFileSync(shell, `#!/bin/sh\necho ${shellMarker}\n`);
   chmodSync(shell, 0o755);
   return shell;
+}
+
+function pinnedDispatcher(name, node) {
+  const bin = join(dirs.tmp, `bin-${name}`);
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "hive"), dispatcherScript(node, CLI));
+  chmodSync(join(bin, "hive"), 0o755);
+  return bin;
+}
+
+async function printedRuleCommand(bin) {
+  const result = await runCli(["setup", "--rex-resume"], { cwd: dirs.tmp, dataDir: dirs.dataDir, tmp: dirs.tmp, env: { ...rexEnv, HIVE_BIN_DIR: bin } });
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  const list = /command = \{ (.*) \},/.exec(result.stdout)?.[1];
+  assert.ok(list, result.stdout);
+  return list.split(", ").map((w) => (w.startsWith('"') ? JSON.parse(w) : w));
 }
 
 const resumeArgs = (id) => [process.execPath, CLI, "__rex-resume", String(id), "--data-dir", dirs.dataDir];
@@ -536,5 +553,48 @@ describe("Rex restart survival", () => {
     assert.deepEqual(readdirSync(home).sort(), [".config"]);
     assert.deepEqual(readdirSync(config), ["init.lua"]);
     assert.equal(existsSync(bin), false, "no dispatcher was written");
+  });
+  it("with a dispatcher pinned to this build, the resume record and the printed rule both name the dispatcher, element for element", async () => {
+    const bin = pinnedDispatcher("pinned-record", process.execPath);
+    const { lead, worker } = await startProject("rex-pinned", { HIVE_BIN_DIR: bin });
+    const state = fake.state();
+    const rule = await printedRuleCommand(bin);
+    for (const row of [lead, worker]) {
+      const [report] = reportsIn(state.blocks[row.tmux_target]);
+      assert.deepEqual(report.argv.slice(4), [join(bin, "hive"), "__rex-resume", String(row.id), "--data-dir", dirs.dataDir]);
+      assert.deepEqual(rule, report.argv.map((a) => (a === String(row.id) ? "rex.match.id" : a)));
+    }
+  });
+
+  it("re-pinning the dispatcher to another interpreter leaves the printed rule unchanged and naming no interpreter", async () => {
+    const otherNode = join(mkdtempSync(join(dirs.tmp, "other-node-")), "node");
+    writeFileSync(otherNode, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$@"\n`);
+    chmodSync(otherNode, 0o755);
+    const bin = pinnedDispatcher("repin-rule", process.execPath);
+    const before = await printedRuleCommand(bin);
+    pinnedDispatcher("repin-rule", otherNode);
+    const after = await printedRuleCommand(bin);
+    assert.deepEqual(after, before);
+    assert.equal(before[4], join(bin, "hive"));
+    assert.ok(!before.includes(process.execPath) && !after.includes(otherNode), JSON.stringify(after));
+  });
+
+  it("a Rex restart resumes a worker through the pinned dispatcher, which hands __rex-resume <id> to the CLI unchanged", async () => {
+    const shimDir = mkdtempSync(join(dirs.tmp, "node-shim-"));
+    const log = join(shimDir, "argv.log");
+    const shim = join(shimDir, "node");
+    writeFileSync(shim, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\nexec ${JSON.stringify(process.execPath)} "$@"\n`);
+    chmodSync(shim, 0o755);
+    const bin = pinnedDispatcher("restart-through", shim);
+    const started = await startProject("rex-through", { HIVE_BIN_DIR: bin });
+    const { worker } = started;
+    giveSessions(started);
+    fakeRexDo(dirs.tmp, "restartServer", { trust: true, env: { PATH: CLAUDE_PATH } });
+    await waitFor(() => dumpsOf(worker.name).length === 2, { timeoutMs: 15000 });
+    const resumed = dumpsOf(worker.name).find((d) => d.pid !== worker.pane_pid);
+    assert.equal(rowById(worker.id).pane_pid, resumed.pid, "the row records the harness resumed through the dispatcher");
+    assert.equal(resumed.env.HIVE_AGENT_ID, worker.actor_id);
+    const lines = readFileSync(log, "utf8").split("\n");
+    assert.ok(lines.includes(`${CLI} __rex-resume ${worker.id} --data-dir ${dirs.dataDir}`), lines.join("\n"));
   });
 });

@@ -8,11 +8,11 @@ import { isolateRex, waitFor } from "./rex-helpers.mjs";
 
 const { hasTmux, cleanup: cleanupTmux } = isolateTmux("rex visibility tests");
 const dirs = scratchDirs();
-const fake = isolateRex(dirs.tmp);
 clearHiveEnv();
+const fake = isolateRex(dirs.tmp);
 process.env.HIVE_DATA_DIR = dirs.dataDir;
 const REX_ADDR = process.env.REX_SERVER;
-const rexEnv = Object.fromEntries(Object.entries(fake.env).filter(([k]) => !k.startsWith("HIVE_")));
+const rexEnv = fake.childEnv;
 
 const { db, migrate } = await import("../dist/db.js");
 migrate();
