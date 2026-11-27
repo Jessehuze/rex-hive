@@ -309,7 +309,7 @@ async function graceLoop(argv: string[]): Promise<number> {
         const rex = terminalOfRow(lead!) === "rex"
           ? {
               projectId: lead!.project_id,
-              projectName: lead!.name,
+              projectName: lead!.name, agentId: lead!.id,
               record: (placed: { target: string; pid: string }) => {
                 recordRexSuccessor.immediate(row, lead!, attempt, token, placed);
                 recorded = true;

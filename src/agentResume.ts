@@ -184,6 +184,42 @@ export async function resumeWorker(
   const { config: projectConfig } = loadProjectYml(project.path);
   const placement = projectConfig?.placement ?? (process.env.HIVE_SPAWN_PLACEMENT === "window" ? "window" : "split");
   const layout = projectConfig?.layout ?? DEFAULT_LAYOUT;
+  const { commandString, env: resumeEnv } = workerResumeLaunch(project, agent, resumeHarness, projectConfig);
+
+  const { target, landedInProjectId } = resumeAgent({
+    agentId: agent.id,
+    actorId: agent.actor_id,
+    name: agent.name,
+    projectId: project.id,
+    projectName: project.name,
+    projectPath: project.path,
+    cwd: agent.cwd,
+    commandString,
+    env: resumeEnv,
+    placement,
+    layout,
+    parentActor: options.parentActor,
+    recoveryOnly: options.recoveryOnly,
+  });
+
+  return {
+    agent_id: agent.id,
+    actor_id: agent.actor_id,
+    name: agent.name,
+    tmux_target: target,
+    resumed_session_id: agent.session_id,
+    ...(agent.parked_at ? { was_parked_at: agent.parked_at } : {}),
+    ...(branchDrift ? { branch_drift: branchDrift } : {}),
+    ...(landedInProjectId != null ? { landed_in_project: getProject(landedInProjectId)?.name ?? `project ${landedInProjectId}` } : {}),
+  };
+}
+
+export function workerResumeLaunch(
+  project: Project,
+  agent: AgentRow,
+  resumeHarness: ReturnType<typeof harnessFor>,
+  projectConfig: ReturnType<typeof loadProjectYml>["config"],
+): { commandString: string; env: Record<string, string> } {
   const launchOptions = storedLaunchOptions(agent.extra_args);
   let commandString: string;
   let resumeEnv = workerPaneEnvironment(projectConfig, resumeHarness);
@@ -215,33 +251,7 @@ export async function resumeWorker(
       }),
     });
   }
-
-  const { target, landedInProjectId } = resumeAgent({
-    agentId: agent.id,
-    actorId: agent.actor_id,
-    name: agent.name,
-    projectId: project.id,
-    projectName: project.name,
-    projectPath: project.path,
-    cwd: agent.cwd,
-    commandString,
-    env: resumeEnv,
-    placement,
-    layout,
-    parentActor: options.parentActor,
-    recoveryOnly: options.recoveryOnly,
-  });
-
-  return {
-    agent_id: agent.id,
-    actor_id: agent.actor_id,
-    name: agent.name,
-    tmux_target: target,
-    resumed_session_id: agent.session_id,
-    ...(agent.parked_at ? { was_parked_at: agent.parked_at } : {}),
-    ...(branchDrift ? { branch_drift: branchDrift } : {}),
-    ...(landedInProjectId != null ? { landed_in_project: getProject(landedInProjectId)?.name ?? `project ${landedInProjectId}` } : {}),
-  };
+  return { commandString, env: resumeEnv };
 }
 
 export function workerPaneEnvironment(

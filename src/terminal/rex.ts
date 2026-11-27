@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import { cliPath } from "../dispatcher.js";
 import {
   defaultRexServer,
   RexError,
@@ -53,6 +54,7 @@ const BLOCK_GONE_CODES = new Set(["not_found", "session_not_found"]);
 const WRAPPER_PROGRAMS = new Set(["login"]);
 const ENV_PROGRAM = "env";
 const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const LAUNCH_SHELL = "sh";
 
 export interface ProgramStatus {
   state: string;
@@ -479,8 +481,35 @@ export function rexSnapshot(server?: string | null, extraBlocks: string[] = []):
       probed: entry.probed === true && entry.process !== undefined,
     });
   }
+  if (store !== null) bestEffort(() => applyResumeAnchors(blocks));
   const incomplete = reply.incomplete === true || missingBlocksStillOpen(resolved, wanted.filter((id) => !blocks.has(id)));
   return { answered: true, server: resolved, incomplete, unreachableSince: null, blocks };
+}
+
+export const rexResumedUnderKey = (target: string): string => `terminal:rex:resumed-under:${target}`;
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+// A restored block's process is the user's shell; while the resumed harness under it lives, report the harness.
+function applyResumeAnchors(blocks: Map<string, RexBlock>): void {
+  const ids = [...blocks.keys()];
+  if (ids.length === 0) return;
+  const rows = sql()
+    .prepare(`SELECT key, value FROM kv WHERE key IN (${ids.map(() => "?").join(", ")})`)
+    .all(...ids.map(rexResumedUnderKey)) as { key: string; value: string }[];
+  for (const { key, value } of rows) {
+    const block = blocks.get(key.slice(rexResumedUnderKey("").length));
+    const anchor = guarded(() => JSON.parse(value) as { shell?: unknown; pid?: unknown }, {});
+    if (!block || block.exited || typeof anchor.pid !== "string" || block.pid !== anchor.shell || !/^[1-9]\d*$/.test(anchor.pid)) continue;
+    if (pidAlive(Number(anchor.pid))) Object.assign(block, { pid: anchor.pid, argv: "", programs: [] });
+  }
 }
 
 function missingBlocksStillOpen(server: string, missing: string[]): boolean {
@@ -549,7 +578,9 @@ export function rexOwnership(row: RowPaneIdentity & { command?: string | null },
   if (block.pid !== row.pane_pid) return "reissued";
   const heads = commandHeads(rowCommand(row));
   const programs = block.programs.filter((p) => p !== ENV_PROGRAM);
-  if (heads.length > 0 && programs.length > 0 && !heads.some((h) => programs.includes(h))) return "reissued";
+  if (heads.length > 0 && programs.length > 0 && !heads.some((h) => programs.includes(h))) {
+    return programs.every((p) => p === LAUNCH_SHELL) ? "unknown" : "reissued";
+  }
   return "live";
 }
 
@@ -712,6 +743,7 @@ export interface RexPaneSpec {
   beside?: string;
   retainOnExit: boolean;
   size?: { columns: number; rows: number };
+  agentId?: number;
 }
 
 export interface RexPlaced {
@@ -778,6 +810,14 @@ export function commandArgv(command: string): string[] {
   const words = parsed?.[0] === "exec" ? parsed.slice(1) : parsed;
   if (words && words.length > 0 && !words[0].includes("=") && !SHELL_BUILTINS.has(words[0])) return words;
   return [REX_SHELL, "-c", command];
+}
+
+export const REX_LAUNCH_VERB = "__rex-launch";
+export const REX_LAUNCH_SCRIPT = '"$0" "$1" "$2" "$3" "$$"; shift 4; unset OSC7577_TOKEN; exec "$@"';
+export const hiveInvocation = (): string[] => [process.execPath, cliPath()];
+
+export function rexLaunchArgv(agentId: number, argv: string[]): string[] {
+  return [REX_SHELL, "-c", REX_LAUNCH_SCRIPT, ...hiveInvocation(), REX_LAUNCH_VERB, String(agentId), "--", ...argv];
 }
 
 export const REX_ENV_PROGRAM = "/usr/bin/env";
@@ -906,7 +946,7 @@ function blockOptions(spec: RexPaneSpec, size: { columns: number; rows: number }
   return {
     shell: "none",
     login: false,
-    command: rexBlockCommand(spec.env, spec.argv),
+    command: rexBlockCommand(spec.env, spec.agentId === undefined ? spec.argv : rexLaunchArgv(spec.agentId, spec.argv)),
     cwd: spec.cwd,
     exit: { on_completion: !spec.retainOnExit, quick_exit_threshold_ms: REX_QUICK_EXIT_MS },
     ...(size ? { size } : {}),

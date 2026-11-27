@@ -5,6 +5,7 @@ import { findProjectForCwd } from "./context.js";
 import { db } from "./db.js";
 import { loadProjectYml } from "./projectYml.js";
 import { rexConfigCheck } from "./rexCli.js";
+import { REX_RESUME_RULE_NAME } from "./rexResume.js";
 import { resolveTerminal, type TerminalSource } from "./terminal.js";
 import {
   describeRexServer,
@@ -17,7 +18,6 @@ import {
   rexUnownedIn,
 } from "./terminal/rex.js";
 
-const RESUME_RULE_NAME = "hive";
 const REX_PROGRAM = "rex";
 const NAMING_ON = "ON (workers may rename your session)";
 
@@ -49,13 +49,26 @@ function onPath(name: string): string | null {
   return null;
 }
 
-export function resumeRuleInstalled(configCheck: string): boolean {
-  const section = configCheck.split(/^resume rules:.*$/m)[1] ?? "";
-  return new RegExp(`^\\s+${RESUME_RULE_NAME} \\(`, "m").test(section);
+export function resumeRuleNames(configCheck: string): string[] {
+  const lines = configCheck.split("\n");
+  const start = lines.findIndex((line) => /^resume rules:/.test(line));
+  if (start < 0) return [];
+  const names: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (/^\S/.test(line)) break;
+    const rule = /^ {2}(\S+) \(/.exec(line);
+    if (rule) names.push(rule[1]!);
+  }
+  return names;
 }
 
+export const resumeRuleInstalled = (configCheck: string): boolean => resumeRuleNames(configCheck).includes(REX_RESUME_RULE_NAME);
+
 const SESSION_START_HOOK = /\brex\b[\s\S]*\bsession-start\b/;
-const NAMING_FLAG = /--(?:feature-)?session-naming(?!=false)/;
+const NAMING_FLAG = /--(?:feature-)?session-naming(?:=|\s+)?(["']?)([^\s"']*)\1/g;
+
+export const namingOnIn = (command: string): boolean =>
+  SESSION_START_HOOK.test(command) && [...command.matchAll(NAMING_FLAG)].some((m) => m[2] !== "false");
 
 function sessionStartCommands(file: string): string[] {
   let parsed: { hooks?: { SessionStart?: { hooks?: { command?: unknown }[] }[] } };
@@ -71,7 +84,7 @@ function sessionStartCommands(file: string): string[] {
 export function sessionNamingOn(projectPath: string | null): string | null {
   const files = [join(claudeConfigDir(), "settings.json")];
   if (projectPath) files.push(join(projectPath, ".claude", "settings.json"), join(projectPath, ".claude", "settings.local.json"));
-  return files.find((f) => sessionStartCommands(f).some((c) => SESSION_START_HOOK.test(c) && NAMING_FLAG.test(c))) ?? null;
+  return files.find((f) => sessionStartCommands(f).some(namingOnIn)) ?? null;
 }
 
 function reportBlocks(r: DoctorReport, endpoint: string): void {
@@ -109,7 +122,8 @@ function reportResumeRule(r: DoctorReport): void {
     r.warn(
       "rex resume rule",
       "missing",
-      `no "${RESUME_RULE_NAME}" resume rule is in Rex's init.lua, so after a Rex restart hive blocks come back as shells and the janitor reaps their rows (docs/tmux.md#rex)`,
+      `no "${REX_RESUME_RULE_NAME}" resume rule is in Rex's init.lua, so after a Rex restart hive blocks come back as shells`,
+      "print the rule with: hive setup --rex-resume, append it to init.lua yourself, then run: rex config reload",
     );
   }
 }

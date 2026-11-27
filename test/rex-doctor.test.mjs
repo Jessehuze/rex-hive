@@ -272,6 +272,25 @@ describe("a lead resolved to Rex refuses when Rex cannot serve it", () => {
   });
 });
 
+describe("doctor's Rex config readers", () => {
+  it("reads only rule-name lines under resume rules, so a command line naming hive is not the rule", async () => {
+    const { resumeRuleInstalled, resumeRuleNames } = await import("../dist/rexDoctor.js");
+    const { REX_RESUME_RULE_NAME } = await import("../dist/rexResume.js");
+    const commandOnly = "resume rules: 1\n  claude (built in)\n    command: /bin/sh -c hive (x)\nbindings: 1\n  hive (init.lua:9)\n";
+    assert.deepEqual(resumeRuleNames(commandOnly), ["claude"]);
+    assert.equal(resumeRuleInstalled(commandOnly), false);
+    assert.equal(resumeRuleInstalled(`resume rules: 2\n  claude (built in)\n  ${REX_RESUME_RULE_NAME} (init.lua:38)\n    command: x\n`), true);
+  });
+
+  it("reads --feature-session-naming false with a space, =false and a quoted false as off, and every other spelling as on", async () => {
+    const { namingOnIn } = await import("../dist/rexDoctor.js");
+    const hook = (flag) => `/bin/sh -c 'rex __internal session-start --agent claude ${flag} 2>/dev/null || true'`;
+    for (const off of ["--feature-session-naming=false", "--feature-session-naming false", '--feature-session-naming "false"', ""]) assert.equal(namingOnIn(hook(off)), false, off);
+    for (const on of ["--feature-session-naming", "--feature-session-naming=true", "--feature-session-naming true", "--session-naming"]) assert.equal(namingOnIn(hook(on)), true, on);
+    assert.equal(namingOnIn("other-tool --feature-session-naming"), false, "only Rex's session-start hook counts");
+  });
+});
+
 describe("agent rename on Rex", () => {
   it("relabels the worker's Rex block to the new name", async () => {
     const p = await project("rex-rename");

@@ -276,7 +276,7 @@ export type HiddenOutcome = "rex" | "tmux" | null;
 const workersHidden = (projectPath: string): boolean => loadProjectYml(projectPath).config?.workers === "hidden";
 
 function placeRexPane(
-  spec: Pick<LaunchSpec, "projectId" | "projectName" | "name" | "cwd" | "placement" | "retainOnExit"> & { hidden?: boolean },
+  spec: Pick<LaunchSpec, "projectId" | "projectName" | "name" | "cwd" | "placement" | "retainOnExit"> & { hidden?: boolean; agentId?: number },
   lead: { tmux_target: string },
   envFlags: string[],
   commandString: string,
@@ -291,7 +291,7 @@ function placeRexPane(
     argv: commandArgv(commandString),
     placement: hidden ? "hidden" : spec.placement as "split" | "window",
     beside: lead.tmux_target,
-    retainOnExit: spec.retainOnExit ?? false,
+    retainOnExit: spec.retainOnExit ?? false, agentId: spec.agentId,
   }));
   if (hidden && spec.placement !== "processes") rexRememberShownAs(spec.projectId, placed.target, spec.placement as "split" | "window");
   return {
@@ -313,7 +313,7 @@ function placeAgentPane(
     | "layout"
     | "parentActor"
     | "retainOnExit"
-  > & { hidden?: boolean },
+  > & { hidden?: boolean; agentId?: number },
   envFlags: string[],
   commandString: string,
   title: string,
@@ -455,7 +455,7 @@ export function launchAgent(spec: LaunchSpec): {
 
     const title = windowTitle(spec.projectName, spec.name);
 
-    const launch = { ...spec, hidden: spec.kind === "agent" && workersHidden(spec.projectPath) };
+    const launch = { ...spec, hidden: spec.kind === "agent" && workersHidden(spec.projectPath), agentId: spec.kind === "agent" ? agentId : undefined };
     const placed = placeAgentPane(session, launch, envFlags, commandString, title, (window) => {
       retainedWindow = window;
     });
