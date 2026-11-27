@@ -145,7 +145,7 @@ The terminal is chosen when a **lead** starts. The first match wins (`resolveTer
 
 Workers, processes and handoff successors follow their lead row's terminal, never the setting. A lead already running on tmux keeps putting new workers on tmux until it is restarted, and a row is always driven by the terminal it was recorded on, so changing the setting never strands a running pane.
 
-hive never starts a Rex server: every `rex` call carries `--autostart=false` and a 10 second `--timeout`. Before it creates a lead block, `hive lead` asks the server who it is, and refuses when `rex` is missing, the server is down, or the server's `api_revision` is below `REX_MIN_API_REVISION` (`src/terminal/rex.ts:45`). The refusal names the problem and the way back, `HIVE_TERMINAL=tmux` (`rexRefuseLead`, `src/terminal/rex.ts:1045`).
+hive never starts a Rex server: every `rex` call carries `--autostart=false` and a 10 second `--timeout`. Before it creates a lead block, `hive lead` asks the server who it is, and refuses when `rex` is missing, the server is down, or the server's `api_revision` is below `REX_MIN_API_REVISION` (`src/terminal/rex.ts:46`). The refusal names the problem and the way back, `HIVE_TERMINAL=tmux` (`rexRefuseLead`, `src/terminal/rex.ts:1105`).
 
 ### The layout
 
@@ -159,17 +159,17 @@ Rex session
  └─ tab "<project>/<worker>"     placement: window → its own tab
 ```
 
-- **The home tab.** hive records each project's tab. If Rex says that tab still exists, it is the home, wherever it now lives. Otherwise hive creates it, in the session of the calling block when `hive` runs inside Rex, and otherwise in a session labelled with hive's session name (`homeSession`, `src/terminal/rex.ts:880`). hive never renames a session it did not create.
-- **Labels.** Blocks are labelled `<project>/lead`, `<project>/<worker>` or `<project>/<process>`. Labels are for people; the store is the source of truth. `agent_rename` relabels the worker's block (`rexRelabel`, `src/terminal/rex.ts:1013`).
-- **No re-tiling.** A new split goes beside the lead and takes space from the lead block only. hive never moves or resizes a block you arranged. `hive layout` rebuilds the tab from the configured `layout` only when you run it (`rexApplyLayout`, `src/terminal/rex.ts:1418`).
-- **Focus.** `hive attach`, `hive lead` and `hive next` focus the lead block, then ask a connected Rex app to switch to its session. With Remote Control off, or no app answering, hive prints the session and tab to open (`rexFocus`, `src/terminal/rex.ts:1589`). There are no view sessions and no `-CC`; `hive lead --detach` focuses nothing.
+- **The home tab.** hive records each project's tab. If Rex says that tab still exists, it is the home, wherever it now lives. Otherwise hive creates it, in the session of the calling block when `hive` runs inside Rex, and otherwise in a session labelled with hive's session name (`homeSession`, `src/terminal/rex.ts:940`). hive never renames a session it did not create.
+- **Labels.** Blocks are labelled `<project>/lead`, `<project>/<worker>` or `<project>/<process>`. Labels are for people; the store is the source of truth. `agent_rename` relabels the worker's block (`rexRelabel`, `src/terminal/rex.ts:1073`).
+- **No re-tiling.** A new split goes beside the lead and takes space from the lead block only. hive never moves or resizes a block you arranged. `hive layout` rebuilds the tab from the configured `layout` only when you run it (`rexApplyLayout`, `src/terminal/rex.ts:1478`).
+- **Focus.** `hive attach`, `hive lead` and `hive next` focus the lead block, then ask a connected Rex app to switch to its session. With Remote Control off, or no app answering, hive prints the session and tab to open (`rexFocus`, `src/terminal/rex.ts:1649`). There are no view sessions and no `-CC`; `hive lead --detach` focuses nothing.
 
 ### Hide, show and peek
 
 - `workers: hidden` in `hive.yml` starts new workers hidden; absent means `shown`.
-- `hive hide <worker>` floats a worker as a minimized layer in the lead's tab. It keeps running and receiving wakes, and Rex's working and blocked marks still show it (`rexFloatHidden`, `src/terminal/rex.ts:1219`). A hidden `placement: window` worker floats in the lead's tab too.
-- `hive show <worker>` moves it back into the lead's split, or into a new tab for `placement: window` (`rexUnfloat`, `src/terminal/rex.ts:1246`).
-- `hive peek <worker>` restores the float over the lead and focuses it, without moving it into the split; `hive hide` minimizes it again (`rexPeekBlock`, `src/terminal/rex.ts:1610`).
+- `hive hide <worker>` floats a worker as a minimized layer in the lead's tab. It keeps running and receiving wakes, and Rex's working and blocked marks still show it (`rexFloatHidden`, `src/terminal/rex.ts:1279`). A hidden `placement: window` worker floats in the lead's tab too.
+- `hive show <worker>` moves it back into the lead's split, or into a new tab for `placement: window` (`rexUnfloat`, `src/terminal/rex.ts:1306`).
+- `hive peek <worker>` restores the float over the lead and focuses it, without moving it into the split; `hive hide` minimizes it again (`rexPeekBlock`, `src/terminal/rex.ts:1670`).
 - `--all` covers every running worker and no process. On tmux, hiding a worker is refused.
 
 ### Restart survival
@@ -193,7 +193,7 @@ After a restart, Rex restores blocks and re-runs each program's registered resum
 | `rex blocks: K owned, G rows gone, O orphan blocks` | rows whose block is open, rows whose block is gone, and blocks labelled `<project>/…` with no row, each named with the `rex block close` command to clear it |
 | `rex resume rule: installed\|missing` | the restart-survival trust rule above |
 | `rex session naming hook: off\|ON (workers may rename your session)` | whether Rex's SessionStart hook in a Claude settings file tells agents to name the session after their task (`sessionNamingOn`, `src/rexDoctor.ts:84`); with it ON, every worker may rename your session |
-| `rex reap` (info) | pending block reaps whose server has not answered for over 10 minutes, cleared (`rexClearStaleReaps`, `src/terminal/rex.ts:1050`) |
+| `rex reap` (info) | pending block reaps whose server has not answered for over 10 minutes, cleared (`rexClearStaleReaps`, `src/terminal/rex.ts:1110`) |
 
 tmux-only checks (the `tmux` version, `NO_COLOR`, scratch tmux servers, sessions, window stamps, view sessions) run only when tmux is the effective terminal or a running row is on tmux. A tmux-only setup's doctor output is unchanged.
 
@@ -213,9 +213,9 @@ Rex marks unfocused tabs and sessions whose programs are working or blocked. Tha
 
 ### Known gaps
 
-- **Codex.** No captured Codex screen in Rex's styled (`vt`) format is checked in, so the Codex input-box classifiers have not been checked against a real Rex capture, only through the shared normaliser (`normalizeRexVt`, `src/terminal/rex.ts:223`). Whether Codex emits Rex program status is unverified; if it emits nothing, a Codex row holds wakes exactly as it would on tmux.
+- **Codex.** No captured Codex screen in Rex's styled (`vt`) format is checked in, so the Codex input-box classifiers have not been checked against a real Rex capture, only through the shared normaliser (`normalizeRexVt`, `src/terminal/rex.ts:224`). Whether Codex emits Rex program status is unverified; if it emits nothing, a Codex row holds wakes exactly as it would on tmux.
 - **Crash backstop.** On tmux, a lead pane hive created carries a `pane-exited` hook that stops the project's processes if the lead dies. Rex has no such hook, so processes outlive a Rex lead that dies without its SessionEnd hook. Clear them with `hive stop --all`.
-- **The in-use flag.** Once any project uses Rex, a `terminal:rex:in-use` kv entry makes every hive process include Rex in its liveness snapshot. It is released once it is ten minutes old and no running row or pending reap is left on Rex (`rexReleaseInUse`, `src/terminal/rex.ts:718`).
+- **The in-use flag.** Once any project uses Rex, a `terminal:rex:in-use` kv entry makes every hive process include Rex in its liveness snapshot. It is released once it is ten minutes old and no running row or pending reap is left on Rex (`rexReleaseInUse`, `src/terminal/rex.ts:749`).
 
 ### Fork notes
 

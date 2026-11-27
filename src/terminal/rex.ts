@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import { cliPath } from "../dispatcher.js";
+import { isDefaultStore, storeDir } from "../dataDir.js";
 import {
   defaultRexServer,
   RexError,
@@ -360,7 +361,7 @@ export function rexProbe(target: string, server?: string): RexProbe {
   try {
     const resolved = requireServer(target, server);
     const reply = blockMethod<ProcessReply>(resolved, rexSessionOf(resolved, target), target, "process");
-    const proc = readProcess(reply);
+    const proc = anchored(readProcess(reply), guarded(() => resumeAnchors([target]).get(target), undefined));
     return { live: true, pid: proc.pid || null, argv: proc.argv || null, exited: proc.exited };
   } catch (err) {
     return { live: blockGone(err) ? false : null, pid: null, argv: null, exited: false };
@@ -481,7 +482,7 @@ export function rexSnapshot(server?: string | null, extraBlocks: string[] = []):
       probed: entry.probed === true && entry.process !== undefined,
     });
   }
-  if (store !== null) bestEffort(() => applyResumeAnchors(blocks));
+  bestEffort(() => applyResumeAnchors(blocks));
   const incomplete = reply.incomplete === true || missingBlocksStillOpen(resolved, wanted.filter((id) => !blocks.has(id)));
   return { answered: true, server: resolved, incomplete, unreachableSince: null, blocks };
 }
@@ -497,18 +498,48 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-// A restored block's process is the user's shell; while the resumed harness under it lives, report the harness.
-function applyResumeAnchors(blocks: Map<string, RexBlock>): void {
-  const ids = [...blocks.keys()];
-  if (ids.length === 0) return;
+interface ResumeAnchor {
+  shell: string;
+  pid: string;
+  program: string;
+}
+
+// Dead anchors are deleted when first seen, so a pid reused later under the same shell never reads live.
+function resumeAnchors(ids: string[]): Map<string, ResumeAnchor> {
+  const found = new Map<string, ResumeAnchor>();
+  if (store === null || ids.length === 0) return found;
   const rows = sql()
-    .prepare(`SELECT key, value FROM kv WHERE key IN (${ids.map(() => "?").join(", ")})`)
-    .all(...ids.map(rexResumedUnderKey)) as { key: string; value: string }[];
-  for (const { key, value } of rows) {
-    const block = blocks.get(key.slice(rexResumedUnderKey("").length));
-    const anchor = guarded(() => JSON.parse(value) as { shell?: unknown; pid?: unknown }, {});
-    if (!block || block.exited || typeof anchor.pid !== "string" || block.pid !== anchor.shell || !/^[1-9]\d*$/.test(anchor.pid)) continue;
-    if (pidAlive(Number(anchor.pid))) Object.assign(block, { pid: anchor.pid, argv: "", programs: [] });
+    .prepare(`SELECT project_id, key, value FROM kv WHERE key IN (${ids.map(() => "?").join(", ")})`)
+    .all(...ids.map(rexResumedUnderKey)) as { project_id: number; key: string; value: string }[];
+  for (const { project_id, key, value } of rows) {
+    const anchor = guarded(() => JSON.parse(value) as Partial<ResumeAnchor>, {});
+    const pid = typeof anchor.pid === "string" && /^[1-9]\d*$/.test(anchor.pid) ? anchor.pid : null;
+    if (pid === null || !pidAlive(Number(pid))) {
+      bestEffort(() => void sql().prepare("DELETE FROM kv WHERE project_id = ? AND key = ? AND value = ?").run(project_id, key, value));
+      continue;
+    }
+    if (typeof anchor.shell === "string") found.set(key.slice(rexResumedUnderKey("").length), { shell: anchor.shell, pid, program: anchor.program ?? "" });
+  }
+  return found;
+}
+
+// A restored block's process is the user's shell; while the resumed harness under it lives, report the harness.
+function anchored<T extends { pid: string; argv: string; programs?: string[]; exited: boolean }>(proc: T, anchor: ResumeAnchor | undefined): T {
+  if (!anchor || proc.exited || proc.pid !== anchor.shell) return proc;
+  return { ...proc, pid: anchor.pid, argv: anchor.program, ...(proc.programs ? { programs: anchor.program ? [anchor.program] : [] } : {}) };
+}
+
+// Re-read at decision time: a snapshot taken before a resume committed its anchor must not close that row.
+function currentAnchor(target: string, block: RexBlock | undefined): RexBlock | undefined {
+  if (!block || !block.probed || block.exited) return block;
+  return anchored(block, guarded(() => resumeAnchors([target]).get(target), undefined));
+}
+
+function applyResumeAnchors(blocks: Map<string, RexBlock>): void {
+  const anchors = resumeAnchors([...blocks.keys()]);
+  for (const [id, anchor] of anchors) {
+    const block = blocks.get(id);
+    if (block) blocks.set(id, anchored(block, anchor));
   }
 }
 
@@ -570,7 +601,7 @@ export function rexOwnership(row: RowPaneIdentity & { command?: string | null },
   const observed = usableSnapshot(snap, server, row.tmux_target) ? (snap ?? null) : rexSnapshot(server, [row.tmux_target]);
   if (observed === null) return "unknown";
   if (!observed.answered) return graceExpired(observed, server) ? "gone" : "unknown";
-  const block = observed.blocks.get(row.tmux_target);
+  const block = currentAnchor(row.tmux_target, observed.blocks.get(row.tmux_target));
   if (!block) return observed.incomplete ? "unknown" : "gone";
   if (!block.probed) return "unknown";
   if (block.exited) return "gone";
@@ -596,7 +627,7 @@ export function rexRowProbe(socket: string, target: string, snap?: RexSnapshot |
   const observed = usableSnapshot(snap, server, target) ? (snap ?? null) : rexSnapshot(server, [target]);
   if (observed === null) return { live: null, pid: null };
   if (!observed.answered) return { live: graceExpired(observed, server) ? false : null, pid: null };
-  const block = observed.blocks.get(target);
+  const block = currentAnchor(target, observed.blocks.get(target));
   if (!block) return { live: observed.incomplete ? null : false, pid: null };
   if (!block.probed) return { live: true, pid: null };
   return block.exited ? { live: false, pid: null } : { live: true, pid: block.pid || null };
@@ -812,12 +843,41 @@ export function commandArgv(command: string): string[] {
   return [REX_SHELL, "-c", command];
 }
 
-export const REX_LAUNCH_VERB = "__rex-launch";
 export const REX_LAUNCH_SCRIPT = '"$0" "$1" "$2" "$3" "$$"; shift 4; unset OSC7577_TOKEN; exec "$@"';
 export const hiveInvocation = (): string[] => [process.execPath, cliPath()];
+export const REX_RESUME_VERB = "__rex-resume";
+export const REX_RESUME_PID_ENV = "HIVE_REX_RESUME_PID";
+export const REX_RESUME_SCRIPT = `c=$(${REX_RESUME_PID_ENV}=$$ "$@" 3>&1 1>&2) && [ -n "$c" ] || c='exec "\${SHELL:-/bin/sh}"'; eval "$c"`;
+export const OSC7577_MAX_BYTES = 2048;
+const CONTROL_CHAR = /[\u0000-\u001f\u007f-\u009f]/;
+
+export function resumeDataDirArgs(): string[] {
+  const dir = storeDir();
+  return isDefaultStore(dir) ? [] : ["--data-dir", dir];
+}
+
+export function resumeRecordArgv(agentId: number): string[] {
+  return [REX_SHELL, "-c", REX_RESUME_SCRIPT, "hive", ...hiveInvocation(), REX_RESUME_VERB, String(agentId), ...resumeDataDirArgs()];
+}
+
+// Runs as `node -e` before the harness: loading hive's CLI here ate Rex's quick-exit window.
+export const REX_LAUNCH_JS = [
+  'const [p, i] = process.argv.slice(1), t = process.env.OSC7577_TOKEN || "";',
+  "if (/^[A-Za-z0-9_-]{22,64}$/.test(t) && /^[1-9]\\d*$/.test(i)) {",
+  'const h = "pid=" + i + ":time=" + Math.floor(Date.now() / 1000) + ":" + p;',
+  'const mac = require("crypto").createHash("sha256").update(h + ":" + t).digest("hex");',
+  'process.stdout.write("\\x1b]7577;" + h + ":mac=" + mac + "\\x1b\\\\"); }',
+].join(" ");
+
+export function rexLaunchPayload(agentId: number): string {
+  const argv = resumeRecordArgv(agentId);
+  const payload = `argv=${argv.map((a) => Buffer.from(a, "utf8").toString("base64")).join(",")}`;
+  const longest = `\x1b]7577;pid=${"9".repeat(10)}:time=${"9".repeat(12)}:${payload}:mac=${"0".repeat(64)}\x1b\\`;
+  return argv.some((a) => CONTROL_CHAR.test(a)) || Buffer.byteLength(longest) > OSC7577_MAX_BYTES ? "clear=1" : payload;
+}
 
 export function rexLaunchArgv(agentId: number, argv: string[]): string[] {
-  return [REX_SHELL, "-c", REX_LAUNCH_SCRIPT, ...hiveInvocation(), REX_LAUNCH_VERB, String(agentId), "--", ...argv];
+  return [REX_SHELL, "-c", REX_LAUNCH_SCRIPT, process.execPath, "-e", REX_LAUNCH_JS, rexLaunchPayload(agentId), "--", ...argv];
 }
 
 export const REX_ENV_PROGRAM = "/usr/bin/env";

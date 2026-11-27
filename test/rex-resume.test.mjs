@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 
-import { CLI, clearHiveEnv, isolateTmux, leadRow, McpClient, runCli, scratchDirs } from "./helpers.mjs";
+import { CLI, clearHiveEnv, DIST, isolateTmux, leadRow, McpClient, runCli, runNode, scratchDirs } from "./helpers.mjs";
 import { fakeRexDo, isolateRex, waitFor } from "./rex-helpers.mjs";
 
 const { cleanup: cleanupTmux } = isolateTmux("rex resume tests");
@@ -19,6 +19,7 @@ const { db, migrate } = await import("../dist/db.js");
 migrate();
 await import("../dist/rexInUse.js");
 const terminal = await import("../dist/terminal.js");
+const { janitor } = await import("../dist/scheduler.js");
 const { REX_RESUME_SCRIPT } = await import("../dist/rexResume.js");
 const { rexApi } = await import("../dist/rexCli.js");
 
@@ -164,6 +165,30 @@ describe("Rex restart survival", () => {
       assert.deepEqual(argv.slice(4), [process.execPath, CLI, "__rex-resume", String(row.id), "--data-dir", dirs.dataDir]);
       assert.equal(terminal.rowOwnership(rowById(row.id)), "live", "ownership reads the exec'd harness, not the launch shell");
     }
+  });
+
+  it("the Rex launch step reports its record without loading hive's CLI or opening a store, so a quick death stays inside Rex's threshold", async () => {
+    const { worker } = await startProject("rex-light");
+    const command = fake.state().blocks[worker.tmux_target].command;
+    const sh = command.indexOf("/bin/sh");
+    const dashes = command.indexOf("--", sh + 3);
+    const launch = command.slice(sh, dashes + 1);
+    assert.ok(!launch.some((w) => w.endsWith(".js")), `the launch step runs no hive script: ${JSON.stringify(launch.slice(3))}`);
+    const token = "t".repeat(32);
+    const fresh = join(dirs.tmp, "launch-store-must-not-exist");
+    const run = spawnSync(launch[0], [...launch.slice(1), "/bin/echo", "HARNESS-RAN"], {
+      env: { PATH: rexEnv.PATH, OSC7577_TOKEN: token, HIVE_DATA_DIR: fresh },
+      encoding: "utf8",
+    });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /HARNESS-RAN/);
+    const [, body] = run.stdout.match(/\x1b\]7577;([^\x1b]*)\x1b\\/) ?? [];
+    assert.ok(body, JSON.stringify(run.stdout));
+    const cut = body.lastIndexOf(":mac=");
+    assert.equal(createHash("sha256").update(`${body.slice(0, cut)}:${token}`).digest("hex"), body.slice(cut + 5));
+    const argv = body.slice(0, cut).split(":").find((p) => p.startsWith("argv=")).slice(5).split(",").map((a) => Buffer.from(a, "base64").toString("utf8"));
+    assert.deepEqual(argv.slice(4), [process.execPath, CLI, "__rex-resume", String(worker.id), "--data-dir", dirs.dataDir]);
+    assert.equal(existsSync(fresh), false, "the launch step opened no store");
   });
 
   it("__rex-resume for a closed row or a different block refuses and runs a shell", async () => {
@@ -313,6 +338,79 @@ describe("Rex restart survival", () => {
     assert.equal(rowById(worker.id).status, "running", "three janitor ticks leave the resumed worker running");
     assert.equal(terminal.rowOwnership(rowById(worker.id)), "live");
     assert.equal(terminal.rowOwnership(rowById(lead.id)), "live");
+  });
+
+  async function restartResumed(name) {
+    const started = await startProject(name);
+    const { lead, worker } = started;
+    giveSessions(started);
+    fakeRexDo(dirs.tmp, "restartServer", { trust: true, env: { PATH: CLAUDE_PATH } });
+    await waitFor(() => rowById(worker.id).pane_pid !== worker.pane_pid && rowById(lead.id).pane_pid !== lead.pane_pid, { timeoutMs: 15000 });
+    await waitFor(() => dumpsOf(worker.name).some((d) => d.pid === rowById(worker.id).pane_pid), { timeoutMs: 15000 });
+    return started;
+  }
+
+  it("after a trusted restart, a resumed lead's SessionStart records its harness pid and a worker's current command is its harness", async () => {
+    const { lead, worker } = await restartResumed("rex-probe");
+    const leadNow = rowById(lead.id);
+    const shellPid = String(fake.state().blocks[lead.tmux_target].child_pid);
+    assert.notEqual(leadNow.pane_pid, shellPid, "the resumed lead runs under the block's shell");
+    const hook = await runNode(join(DIST, "hook.js"), ["session_start"], {
+      dataDir: dirs.dataDir,
+      env: { ...rexEnv, HIVE_AGENT_ID: lead.actor_id, HIVE_LEAD: "1", REX_BLOCK: lead.tmux_target, CLAUDE_CODE_MESSAGING_SOCKET: "/tmp/rex-resumed-lead.sock" },
+      stdin: JSON.stringify({ hook_event_name: "SessionStart", session_id: `sess-${lead.id}`, source: "resume" }),
+    });
+    assert.equal(hook.code, 0, hook.stderr);
+    const registered = rowById(lead.id);
+    assert.equal(registered.claude_messaging_socket, "/tmp/rex-resumed-lead.sock");
+    assert.equal(registered.claude_messaging_pane_pid, registered.pane_pid, "quiet messaging needs the registered pid to be the row's pane pid");
+    assert.equal(terminal.panePid(worker.tmux_target), rowById(worker.id).pane_pid);
+    assert.equal(terminal.paneCurrentCommand(worker.tmux_target), "claude", "agent_status's current_command names the harness, not the shell");
+  });
+
+  it("a resumed-under anchor whose pid is seen dead is deleted, so a later reuse of that pid cannot read live", async () => {
+    const { worker } = await restartResumed("rex-reuse-anchor");
+    const key = `terminal:rex:resumed-under:${worker.tmux_target}`;
+    const anchorRow = () => db.prepare("SELECT value FROM kv WHERE key = ?").get(key);
+    assert.ok(anchorRow(), "the resume recorded an anchor");
+    const resumedPid = rowById(worker.id).pane_pid;
+    await killAndWait(resumedPid);
+    assert.equal(terminal.rowOwnership(rowById(worker.id)), "reissued");
+    assert.equal(anchorRow(), undefined, "the first dead sighting deletes the anchor");
+    const stranger = spawn("sleep", ["600"], { stdio: "ignore" });
+    try {
+      db.prepare("UPDATE agents SET pane_pid = ? WHERE id = ?").run(String(stranger.pid), worker.id);
+      assert.equal(terminal.rowOwnership(rowById(worker.id)), "reissued", "a live pid the row names is not owned without an anchor");
+    } finally {
+      stranger.kill("SIGKILL");
+      db.prepare("UPDATE agents SET status = 'closed' WHERE id = ?").run(worker.id);
+    }
+  });
+
+  it("a janitor tick whose snapshot predates a resume's anchor commit leaves the freshly resumed worker running", async () => {
+    const { worker } = await startProject("rex-race-anchor");
+    fakeRexDo(dirs.tmp, "restartServer", { trust: false, env: { PATH: CLAUDE_PATH } });
+    const shellPid = String(fake.state().blocks[worker.tmux_target].child_pid);
+    const snapshot = terminal.liveTargets();
+    assert.equal(snapshot.rex.blocks.get(worker.tmux_target).pid, shellPid, "the snapshot saw the block's shell, before any anchor");
+    const harness = spawn("sleep", ["600"], { stdio: "ignore" });
+    try {
+      db.transaction(() => {
+        db.prepare("UPDATE agents SET pane_pid = ?, created_at = datetime('now', '-1 hour') WHERE id = ? AND status = 'running'").run(String(harness.pid), worker.id);
+        db.prepare("INSERT INTO kv (project_id, key, value, updated_by) VALUES (?, ?, ?, 'hive')").run(
+          worker.project_id,
+          `terminal:rex:resumed-under:${worker.tmux_target}`,
+          JSON.stringify({ shell: shellPid, pid: String(harness.pid), program: "claude" }),
+        );
+      })();
+      assert.equal(rowById(worker.id).pane_pid, String(harness.pid), "the resume committed on a running row");
+      janitor(snapshot);
+      assert.equal(rowById(worker.id).status, "running", "the stale snapshot did not close the resumed row");
+      assert.equal(terminal.rowOwnership(rowById(worker.id)), "live");
+    } finally {
+      harness.kill("SIGKILL");
+      db.prepare("UPDATE agents SET status = 'closed' WHERE id = ?").run(worker.id);
+    }
   });
 
   it("when a resumed harness exits under Rex's wrapper, its row is a lost worker and the block's shell stays open", async () => {

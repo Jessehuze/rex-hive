@@ -1,9 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
-import { db, dataDir } from "./db.js";
-import { isDefaultStore } from "./dataDir.js";
+import { db } from "./db.js";
 import type { AgentRow } from "./agentRecords.js";
 import { getProject } from "./context.js";
 import { workerResumeLaunch } from "./agentResume.js";
@@ -15,16 +13,12 @@ import { FIRST_MESSAGE_SHA_ENV } from "./firstMessage.js";
 import { loadProjectYml } from "./projectYml.js";
 import { shellQuote } from "./tmux.js";
 import { ACTIVE_TIMER_WHERE, socketAwaitingWhere } from "./wakeSql.js";
-import { commandArgv, hiveInvocation, REX_SHELL, REX_SOCKET_PREFIX, rexBlockCommand, rexLaunchArgv, rexResumedUnderKey } from "./terminal/rex.js";
+import { commandArgv, programWords, REX_SHELL, REX_SOCKET_PREFIX, rexBlockCommand, rexLaunchArgv, rexResumedUnderKey, resumeDataDirArgs, resumeRecordArgv } from "./terminal/rex.js";
 
-export const REX_RESUME_VERB = "__rex-resume";
-export const REX_RESUME_PID_ENV = "HIVE_REX_RESUME_PID";
-export const REX_RESUME_SCRIPT = `c=$(${REX_RESUME_PID_ENV}=$$ "$@" 3>&1 1>&2) && [ -n "$c" ] || c='exec "\${SHELL:-/bin/sh}"'; eval "$c"`;
+export { OSC7577_MAX_BYTES, REX_RESUME_PID_ENV, REX_RESUME_SCRIPT, REX_RESUME_VERB, resumeRecordArgv } from "./terminal/rex.js";
+
 export const REX_RESUME_RULE_NAME = "hive";
 export const OSC7577_TOKEN_ENV = "OSC7577_TOKEN";
-export const OSC7577_MAX_BYTES = 2048;
-const TOKEN_SHAPE = /^[A-Za-z0-9_-]{22,64}$/;
-const CONTROL_CHAR = /[\u0000-\u001f\u007f-\u009f]/;
 
 export class RexResumeRefusal extends Error {
   constructor(readonly who: string, readonly reason: string) {
@@ -37,35 +31,11 @@ function refuse(who: string, reason: string): never {
   throw new RexResumeRefusal(who, reason);
 }
 
-const dataDirArgs = (): string[] => (isDefaultStore(dataDir) ? [] : ["--data-dir", dataDir]);
-
-export function resumeRecordArgv(agentId: number): string[] {
-  return [REX_SHELL, "-c", REX_RESUME_SCRIPT, "hive", ...hiveInvocation(), REX_RESUME_VERB, String(agentId), ...dataDirArgs()];
-}
-
-const b64 = (text: string): string => Buffer.from(text, "utf8").toString("base64");
-
-export function osc7577Report(pairs: string, token: string): string {
-  const mac = createHash("sha256").update(`${pairs}:${token}`).digest("hex");
-  return `\x1b]7577;${pairs}:mac=${mac}\x1b\\`;
-}
-
-export function rexLaunchReport(agentId: number, pid: string, token: string | undefined, nowMs = Date.now()): string | null {
-  if (!token || !TOKEN_SHAPE.test(token) || !/^[1-9]\d*$/.test(pid)) return null;
-  const head = `pid=${pid}:time=${Math.floor(nowMs / 1000)}`;
-  const argv = resumeRecordArgv(agentId);
-  const report = osc7577Report(`${head}:argv=${argv.map(b64).join(",")}`, token);
-  if (argv.some((a) => CONTROL_CHAR.test(a)) || Buffer.byteLength(report) > OSC7577_MAX_BYTES) {
-    return osc7577Report(`${head}:clear=1`, token);
-  }
-  return report;
-}
-
 const luaString = (s: string): string => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 
 export function rexResumeTrustRule(): string {
   const words = resumeRecordArgv(0).map(luaString);
-  words[words.length - 1 - dataDirArgs().length] = "rex.match.id";
+  words[words.length - 1 - resumeDataDirArgs().length] = "rex.match.id";
   return [
     `rex.set("resume.trust.${REX_RESUME_RULE_NAME}", {`,
     `  command = { ${words.join(", ")} },`,
@@ -144,20 +114,21 @@ function leadLaunch(row: AgentRow, projectPath: string): ResumeLaunch {
   };
 }
 
-function recordResumeAnchor(row: AgentRow, pid: string, shell: string | null): void {
+function recordResumeAnchor(row: AgentRow, pid: string, shell: string | null, program: string): void {
   const key = rexResumedUnderKey(row.tmux_target);
   if (!shell) return void db.prepare("DELETE FROM kv WHERE project_id = ? AND key = ?").run(row.project_id, key);
   db.prepare(
     `INSERT INTO kv (project_id, key, value, updated_by) VALUES (?, ?, ?, 'hive')
      ON CONFLICT (project_id, key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
-  ).run(row.project_id, key, JSON.stringify({ shell, pid }));
+  ).run(row.project_id, key, JSON.stringify({ shell, pid, program }));
 }
 
 function recordResumedPid(row: AgentRow, pid: string, command: string, pending: boolean): boolean {
   const shell = psField(pid, "ppid");
+  const program = basename(programWords(commandArgv(command))[0] ?? "");
   return db.transaction(() => {
     const changed = recordRowPid(row, pid, command, pending);
-    if (changed) recordResumeAnchor(row, pid, shell && /^[1-9]\d*$/.test(shell) ? shell : null);
+    if (changed) recordResumeAnchor(row, pid, shell && /^[1-9]\d*$/.test(shell) ? shell : null, program);
     return changed;
   }).immediate();
 }
