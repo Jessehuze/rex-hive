@@ -33,6 +33,9 @@ terminal: tmux                # optional; tmux (default) or rex. Read when a lea
                               # refuses to start when rex is missing, its server is down, or the
                               # server is too old; see docs/tmux.md#rex.
 workers: shown                # optional; shown (default) or hidden: how new workers start
+retile: true                  # optional, Rex only; true (default) re-applies layout to the
+                              # lead's tab after each split spawn, resume, fork, close, show or
+                              # hide; false leaves blocks where they are. tmux ignores it.
 agents: [claude, codex]       # optional allowed harness set for spawned crew; first entry is
                               # the default. Absent or empty means claude only, and agent_spawn
                               # REFUSES a harness or command outside this list. lead: above is a

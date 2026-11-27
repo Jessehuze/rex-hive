@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 
@@ -205,10 +205,11 @@ describe("worker visibility on Rex", () => {
     assert.match((await cli(["show", "w-toggle"], dir)).stdout, /w-toggle: already shown/);
   });
 
-  it("hide --all and show --all cover every running worker and no process", async () => {
+  it("with retile: false, hide --all and show --all make no mutating call naming a running process", async () => {
     const dir = freshProject("vis-all");
     const { project, lead, mcp } = await startLead(dir);
     await seedTrustedYml({ db, projectId: project.id, projectDir: dir, processes: { web: "sleep 600" } });
+    appendFileSync(join(dir, "hive.yml"), "retile: false\n");
     assert.equal((await cli(["start", "web"], dir)).code, 0);
     const web = db.prepare("SELECT tmux_target FROM agents WHERE project_id = ? AND name = 'web' AND status = 'running'").get(project.id).tmux_target;
     const one = await spawn(mcp, "w-a", { placement: "split" });

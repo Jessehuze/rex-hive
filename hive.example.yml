@@ -15,6 +15,8 @@ lead: claude                    # custom command for the lead window (default: c
 # terminal: tmux                # tmux (default) | rex; read when a lead starts, and its
 #                               # workers keep that lead's terminal. HIVE_TERMINAL wins.
 # workers: shown                # shown (default) | hidden: how new workers start
+# retile: true                  # Rex only: re-apply layout to the lead's tab after each split
+#                               # change (default true); false leaves blocks where they are
 
 agents: [claude, codex]         # crew harness pool agent_spawn may pick from; claude is first so
                                 # it stays the default. lead: above is separate and unaffected.

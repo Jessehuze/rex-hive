@@ -208,7 +208,7 @@ import {
   waitForPaneEstablished,
   windowLayout,
 } from "./terminal.js";
-import { commandArgv, envFromFlags, rexClose, rexCannotTell, rexCreatePane, rexFocus, rexHideBlock, rexLayoutProject, rexPeekBlock, rexProjectLead, rexRefuseLead, rexRefuseQuickExit, rexShowBlock, rexShownAs, rexVisibility } from "./terminal/rex.js"; import { rexDoctorSection } from "./rexDoctor.js";
+import { commandArgv, envFromFlags, rexClose, rexCannotTell, rexCreatePane, rexFocus, rexLayoutProject, rexPeekBlock, rexProjectLead, rexRefuseLead, rexRefuseQuickExit, rexShownAs, rexVisibility } from "./terminal/rex.js"; import { rexDoctorSection } from "./rexDoctor.js"; import { rexHideRetiled, rexShowRetiled } from "./rexRetile.js";
 import { collectCrew, crewStoreProblem } from "./crew.js";
 import { resumeWorker, validateResumeWorker } from "./agentResume.js";
 import { markWorkerLost } from "./workerRecovery.js";
@@ -1246,9 +1246,9 @@ const hiveYmlTemplate = (rex: boolean): string => `# hive project config. Read b
 
 # lead: claude --model opus     # custom command for the lead window (default: claude)
 
-# terminal: tmux                # tmux (default) | rex; HIVE_TERMINAL overrides it.
-                                # read when a lead starts; its workers keep the lead's terminal
+# terminal: tmux                # tmux (default) | rex, read when a lead starts; HIVE_TERMINAL wins
 # workers: shown                # shown (default) | hidden: how new workers start
+# retile: true                  # Rex only: true (default) re-tiles the lead's tab on split changes
 
 # agents: [claude, codex]       # crew harness pool; the first entry is the default
 
@@ -2072,10 +2072,10 @@ const configuredPlacement = (config: ProjectYml | null): "split" | "window" =>
 
 function showWorker(hit: VisibilityHit): string {
   const placement = rexShownAs(hit.project.id, hit.target) ?? configuredPlacement(hit.config);
-  return withWindowClaim(() => rexShowBlock(hit.project.id, hit.name, hit.target, placement, `${hit.project.name}/${hit.name}`));
+  return withWindowClaim(() => rexShowRetiled(hit.project.id, hit.name, hit.target, placement, `${hit.project.name}/${hit.name}`));
 }
 
-const hideWorker = (hit: VisibilityHit): string => withWindowClaim(() => rexHideBlock(hit.project.id, hit.name, hit.target, true));
+const hideWorker = (hit: VisibilityHit): string => withWindowClaim(() => rexHideRetiled(hit.project.id, hit.name, hit.target, true));
 
 function visibilityCommand(argv: string[], verb: "show" | "hide"): VisibilityHit | null {
   const parsed = parseArgs(argv, { flags: ["--all"] });
@@ -2282,7 +2282,7 @@ function cmdShow(argv: string[]): void {
   if (found.worker) return console.log(showWorker(found));
   const { project, name, target } = found;
   const config = found.config!;
-  if (isRexTarget(target)) return console.log(withWindowClaim(() => rexShowBlock(project.id, name, target, config.placement ?? "split", `${project.name}/${name}`)));
+  if (isRexTarget(target)) return console.log(withWindowClaim(() => rexShowRetiled(project.id, name, target, config.placement ?? "split", `${project.name}/${name}`)));
   const session = sessionName();
 
   // Read the window inside the claim, never before it: tmux destroys a window when its last pane
@@ -2308,7 +2308,7 @@ function cmdHide(argv: string[]): void {
   if (!found) return;
   if (found.worker) return console.log(hideWorker(found));
   const { project, name, target } = found;
-  if (isRexTarget(target)) return console.log(withWindowClaim(() => rexHideBlock(project.id, name, target)));
+  if (isRexTarget(target)) return console.log(withWindowClaim(() => rexHideRetiled(project.id, name, target)));
   const session = sessionName();
 
   // One claim over the whole decision: the group window comes and goes with its last pane, so both
@@ -3341,7 +3341,7 @@ function reportEffectiveConfig(loaded: ResolvedHiveConfig): void {
       for (const w of terminalWarnings) warn("config terminal", w);
       if (resolved.source !== "default" || rexActive()) info("config terminal", `${JSON.stringify(resolved.terminal)} (source: ${resolved.source})`);
       continue;
-    } else if (key === "workers" && config.workers === null && !rexActive()) continue;
+    } else if ((key === "workers" || key === "retile") && config[key] === null && !rexActive()) continue;
     info(`config ${key}`, `${JSON.stringify(config[key])} (source: ${loaded.sources[key] ?? "built-in"})`);
   }
   const varKeys = new Set(Object.keys(config.vars));

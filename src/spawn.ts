@@ -42,7 +42,7 @@ import {
   waitForPaneEstablished,
   rowOwnership,
 } from "./terminal.js";
-import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexForgetShownAs, rexRefuseQuickExit, rexRememberShownAs, rexRelabel } from "./terminal/rex.js";
+import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexForgetShownAs, rexRefuseQuickExit, rexRememberShownAs, rexRelabel } from "./terminal/rex.js"; import { rexCloseRetiled, rexRetileAfterPlace } from "./rexRetile.js";
 
 export function withWindowClaim<T>(claim: () => T): T {
   if (db.inTransaction) {
@@ -191,7 +191,7 @@ export function relayoutAfterPaneLeft(window: string | null): void {
 
 export function killAgentPane(target: string): void {
   const pane = isPaneTarget(target);
-
+  if (isRexTarget(target)) return rexCloseRetiled(target, () => killAgentPaneWithoutRelayout(target), withWindowClaim);
   const window = pane ? paneWindow(target) : null;
   killAgentPaneWithoutRelayout(target);
   relayoutAfterPaneLeft(window);
@@ -276,13 +276,13 @@ export type HiddenOutcome = "rex" | "tmux" | null;
 const workersHidden = (projectPath: string): boolean => loadProjectYml(projectPath).config?.workers === "hidden";
 
 function placeRexPane(
-  spec: Pick<LaunchSpec, "projectId" | "projectName" | "name" | "cwd" | "placement" | "retainOnExit"> & { hidden?: boolean; agentId?: number },
-  lead: { tmux_target: string },
+  spec: Pick<LaunchSpec, "projectId" | "projectName" | "projectPath" | "name" | "cwd" | "placement" | "layout" | "retainOnExit"> & { hidden?: boolean; agentId?: number },
+  lead: { tmux_target: string; tmux_socket: string },
   envFlags: string[],
   commandString: string,
 ): PlacedPane {
-  const hidden = spec.placement === "processes" || spec.hidden === true;
-  const placed = withWindowClaim(() => rexCreatePane({
+  const hidden = spec.placement === "processes" || spec.hidden === true; let retiled = false;
+  const placed = withWindowClaim(() => { const made = rexCreatePane({
     projectId: spec.projectId,
     projectName: spec.projectName,
     label: `${spec.projectName}/${spec.name}`,
@@ -292,10 +292,10 @@ function placeRexPane(
     placement: hidden ? "hidden" : spec.placement as "split" | "window",
     beside: lead.tmux_target,
     retainOnExit: spec.retainOnExit ?? false, agentId: spec.agentId,
-  }));
+  }); retiled = rexRetileAfterPlace({ ...spec, hidden }, lead, made.target); return made; });
   if (hidden && spec.placement !== "processes") rexRememberShownAs(spec.projectId, placed.target, spec.placement as "split" | "window");
   return {
-    target: placed.target, pid: placed.pid, socket: placed.socket, landedInProjectId: null, layoutApplied: false,
+    target: placed.target, pid: placed.pid, socket: placed.socket, landedInProjectId: null, layoutApplied: retiled,
     inProcessesWindow: spec.placement === "processes", hidden: spec.hidden === true ? "rex" : null,
   };
 }

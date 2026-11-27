@@ -2,8 +2,8 @@ import { getProject } from "./context.js";
 import type { ProcessSnapshot, WorkerSubagents } from "./dashboard.js";
 import { db } from "./db.js";
 import { loadProjectYml } from "./projectYml.js";
-import { closeAgentRow, currentOwnership, killAgentPane, paneIdentity, relayoutAfterPaneLeft } from "./spawn.js";
-import { rexAwaitPorts, rexStopProcess, rexVisibilityAndPorts, rowServer, type RexPort } from "./terminal/rex.js";
+import { closeAgentRow, currentOwnership, killAgentPane, paneIdentity, relayoutAfterPaneLeft, withWindowClaim } from "./spawn.js";
+import { rexAwaitPorts, rexStopProcess, rexVisibilityAndPorts, rowServer, type RexPort } from "./terminal/rex.js"; import { rexCloseRetiled } from "./rexRetile.js";
 import {
   sessionName,
   type AliveSnapshot, type RowOwnership,
@@ -287,7 +287,7 @@ function stopRexProcess(row: StoppableRow, identity: ReturnType<typeof paneIdent
   }
   let stopped: { exited: boolean; gone: boolean };
   try {
-    stopped = rexStopProcess(row.tmux_target, STOP_GRACE_MS, rowServer(row.tmux_socket, row.tmux_target) ?? undefined);
+    stopped = rexCloseRetiled(row.tmux_target, () => rexStopProcess(row.tmux_target, STOP_GRACE_MS, rowServer(row.tmux_socket, row.tmux_target) ?? undefined), withWindowClaim);
   } catch {
     return { name: row.name, leg: "unreachable", note: REX_UNREACHABLE_NOTE };
   }

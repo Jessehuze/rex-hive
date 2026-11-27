@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 
@@ -288,7 +288,7 @@ describe("Rex hide and show edges", () => {
 });
 
 describe("hive layout on Rex", () => {
-  it("hive layout on Rex is the only path that resizes", async () => {
+  it("with retile: false, hive layout on Rex is the only path that resizes", async () => {
     const dir = freshProject("rex-layout");
     const before = realCalls().length;
     const { project, lead } = await startLead(dir);
@@ -299,6 +299,7 @@ describe("hive layout on Rex", () => {
     }).block_ids[0];
     const userRect = round(locate(mineBlock).rect);
     await seedTrustedYml({ db, projectId: project.id, projectDir: dir, processes: { bg: { command: "sleep 600", visible: false } } });
+    appendFileSync(join(dir, "hive.yml"), "retile: false\n");
     assert.equal((await cli(["start", "bg"], dir)).code, 0);
     const hiddenProc = processRow(project.id, "bg").tmux_target;
     const resizing = ["session.resize_pane", "session.resize_layer"];

@@ -1676,3 +1676,36 @@ export function rexPeekBlock(projectId: number, name: string, target: string): s
   rexApi(spot.server, "session.set_layer_state", { session_id: spot.session, layer_id: spot.layer, state: "normal", focus: true });
   return `${name}: peeking over the lead; hive hide ${name} minimizes it again`;
 }
+
+export function rexTiledInTab(anchor: { tmux_target: string; tmux_socket: string }, target: string): boolean {
+  const server = rowServer(anchor.tmux_socket, anchor.tmux_target);
+  if (!server) return false;
+  const view = sessionView(server, rexSessionOf(server, anchor.tmux_target));
+  const home = placeOf(view, anchor.tmux_target);
+  const mine = placeOf(view, target);
+  return !!home && !!mine && !mine.floating && mine.window === home.window;
+}
+
+export function rexRetileTab(anchor: { tmux_target: string; tmux_socket: string }, layout: WindowLayout, extra: string[] = []): RexLayoutPlan | null {
+  const server = rowServer(anchor.tmux_socket, anchor.tmux_target);
+  if (!server) return null;
+  const rows = (sql()
+    .prepare(
+      `SELECT name, kind, tmux_target, tmux_socket, pane_pid, command FROM agents
+        WHERE kind != 'lead' AND status = 'running' AND tmux_target LIKE 'block:%' AND tmux_socket = ? AND tmux_target != ? ORDER BY id`,
+    )
+    .all(anchor.tmux_socket, anchor.tmux_target) as ProjectBlockRow[]);
+  const snap = rexSnapshot(server, [...rows.map((r) => r.tmux_target), ...extra]);
+  if (snap === null || !snap.answered) return null;
+  const view = sessionView(server, rexSessionOf(server, anchor.tmux_target));
+  const home = placeOf(view, anchor.tmux_target);
+  if (!home || home.floating) return null;
+  const inTab = (block: string): boolean => {
+    const where = placeOf(view, block);
+    return !!where && !where.floating && where.window === home.window;
+  };
+  const owned = rows.filter((r) => rexOwnership(r, snap) === "live").map((r) => r.tmux_target);
+  const blocks = [...new Set([...owned, ...extra])].filter((b) => b !== anchor.tmux_target && inTab(b));
+  if (blocks.length === 0) return null;
+  return rexApplyLayout({ lead: anchor.tmux_target, blocks, server }, layout);
+}
