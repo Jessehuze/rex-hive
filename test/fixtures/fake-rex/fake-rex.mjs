@@ -1159,6 +1159,27 @@ function main(argv) {
       });
       return 0;
     }
+    case "ls": {
+      const f = flags(tail, { "--json": "json?" });
+      const sessions = state.sessions.map((s) => ({ session_id: s.session_id, label: s.label }));
+      if (f.json) emit({ sessions });
+      else process.stdout.write(sessions.map((s) => `${s.session_id}\t${s.label}\n`).join(""));
+      return 0;
+    }
+    case "kill": {
+      if (tail.length === 0) fail("bad_request", "kill needs a SESSION");
+      withLock((s) => {
+        for (const ref of tail) {
+          const session = s.sessions.find((x) => x.session_id === ref || x.label === ref);
+          if (!session) fail("session_not_found", `session ${ref}`);
+          for (const block of Object.values(s.blocks).filter((b) => b.session_id === session.session_id)) closeBlock(s, block);
+          s.windows = s.windows.filter((w) => w.session_id !== session.session_id);
+          s.sessions = s.sessions.filter((x) => x !== session);
+          nextRevision(s);
+        }
+      });
+      return 0;
+    }
     case "wait": {
       const f = flags(tail, { "--for": "for", "-s": "session", "--session": "session", "-w": "window", "--window": "window", "--json": "json?" });
       return waitFor(f._[0], f.for, f.json);
