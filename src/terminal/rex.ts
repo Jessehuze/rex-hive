@@ -529,6 +529,12 @@ function anchored<T extends { pid: string; argv: string; programs?: string[]; ex
   return { ...proc, pid: anchor.pid, argv: anchor.program, ...(proc.programs ? { programs: anchor.program ? [anchor.program] : [] } : {}) };
 }
 
+// Re-read at decision time: a snapshot taken before a resume committed its anchor must not close that row.
+function currentAnchor(target: string, block: RexBlock | undefined): RexBlock | undefined {
+  if (!block || !block.probed || block.exited) return block;
+  return anchored(block, guarded(() => resumeAnchors([target]).get(target), undefined));
+}
+
 function applyResumeAnchors(blocks: Map<string, RexBlock>): void {
   const anchors = resumeAnchors([...blocks.keys()]);
   for (const [id, anchor] of anchors) {
@@ -595,7 +601,7 @@ export function rexOwnership(row: RowPaneIdentity & { command?: string | null },
   const observed = usableSnapshot(snap, server, row.tmux_target) ? (snap ?? null) : rexSnapshot(server, [row.tmux_target]);
   if (observed === null) return "unknown";
   if (!observed.answered) return graceExpired(observed, server) ? "gone" : "unknown";
-  const block = observed.blocks.get(row.tmux_target);
+  const block = currentAnchor(row.tmux_target, observed.blocks.get(row.tmux_target));
   if (!block) return observed.incomplete ? "unknown" : "gone";
   if (!block.probed) return "unknown";
   if (block.exited) return "gone";
@@ -621,7 +627,7 @@ export function rexRowProbe(socket: string, target: string, snap?: RexSnapshot |
   const observed = usableSnapshot(snap, server, target) ? (snap ?? null) : rexSnapshot(server, [target]);
   if (observed === null) return { live: null, pid: null };
   if (!observed.answered) return { live: graceExpired(observed, server) ? false : null, pid: null };
-  const block = observed.blocks.get(target);
+  const block = currentAnchor(target, observed.blocks.get(target));
   if (!block) return { live: observed.incomplete ? null : false, pid: null };
   if (!block.probed) return { live: true, pid: null };
   return block.exited ? { live: false, pid: null } : { live: true, pid: block.pid || null };

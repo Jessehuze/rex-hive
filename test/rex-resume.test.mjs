@@ -19,6 +19,7 @@ const { db, migrate } = await import("../dist/db.js");
 migrate();
 await import("../dist/rexInUse.js");
 const terminal = await import("../dist/terminal.js");
+const { janitor } = await import("../dist/scheduler.js");
 const { REX_RESUME_SCRIPT } = await import("../dist/rexResume.js");
 const { rexApi } = await import("../dist/rexCli.js");
 
@@ -382,6 +383,32 @@ describe("Rex restart survival", () => {
       assert.equal(terminal.rowOwnership(rowById(worker.id)), "reissued", "a live pid the row names is not owned without an anchor");
     } finally {
       stranger.kill("SIGKILL");
+      db.prepare("UPDATE agents SET status = 'closed' WHERE id = ?").run(worker.id);
+    }
+  });
+
+  it("a janitor tick whose snapshot predates a resume's anchor commit leaves the freshly resumed worker running", async () => {
+    const { worker } = await startProject("rex-race-anchor");
+    fakeRexDo(dirs.tmp, "restartServer", { trust: false, env: { PATH: CLAUDE_PATH } });
+    const shellPid = String(fake.state().blocks[worker.tmux_target].child_pid);
+    const snapshot = terminal.liveTargets();
+    assert.equal(snapshot.rex.blocks.get(worker.tmux_target).pid, shellPid, "the snapshot saw the block's shell, before any anchor");
+    const harness = spawn("sleep", ["600"], { stdio: "ignore" });
+    try {
+      db.transaction(() => {
+        db.prepare("UPDATE agents SET pane_pid = ?, created_at = datetime('now', '-1 hour') WHERE id = ? AND status = 'running'").run(String(harness.pid), worker.id);
+        db.prepare("INSERT INTO kv (project_id, key, value, updated_by) VALUES (?, ?, ?, 'hive')").run(
+          worker.project_id,
+          `terminal:rex:resumed-under:${worker.tmux_target}`,
+          JSON.stringify({ shell: shellPid, pid: String(harness.pid), program: "claude" }),
+        );
+      })();
+      assert.equal(rowById(worker.id).pane_pid, String(harness.pid), "the resume committed on a running row");
+      janitor(snapshot);
+      assert.equal(rowById(worker.id).status, "running", "the stale snapshot did not close the resumed row");
+      assert.equal(terminal.rowOwnership(rowById(worker.id)), "live");
+    } finally {
+      harness.kill("SIGKILL");
       db.prepare("UPDATE agents SET status = 'closed' WHERE id = ?").run(worker.id);
     }
   });
