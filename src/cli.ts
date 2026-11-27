@@ -208,12 +208,12 @@ import {
   waitForPaneEstablished,
   windowLayout,
 } from "./terminal.js";
-import { commandArgv, envFromFlags, REX_LAUNCH_VERB, rexClose, rexCannotTell, rexCreatePane, rexFocus, rexHideBlock, rexLayoutProject, rexPeekBlock, rexProjectLead, rexRefuseLead, rexRefuseQuickExit, rexShowBlock, rexShownAs, rexVisibility } from "./terminal/rex.js"; import { rexDoctorSection } from "./rexDoctor.js";
+import { commandArgv, envFromFlags, rexClose, rexCannotTell, rexCreatePane, rexFocus, rexHideBlock, rexLayoutProject, rexPeekBlock, rexProjectLead, rexRefuseLead, rexRefuseQuickExit, rexShowBlock, rexShownAs, rexVisibility } from "./terminal/rex.js"; import { rexDoctorSection } from "./rexDoctor.js";
 import { collectCrew, crewStoreProblem } from "./crew.js";
 import { resumeWorker, validateResumeWorker } from "./agentResume.js";
 import { markWorkerLost } from "./workerRecovery.js";
 import { rexCallerBlock } from "./rexCli.js";
-import { REX_RESUME_PID_ENV, REX_RESUME_RULE_NAME, REX_RESUME_VERB, rexLaunchReport, rexResumeLine, rexResumeTrustRule } from "./rexResume.js";
+import { REX_RESUME_PID_ENV, REX_RESUME_RULE_NAME, REX_RESUME_VERB, rexResumeLine, rexResumeTrustRule } from "./rexResume.js";
 import type { AgentRow } from "./agentRecords.js";
 import { describeProcess, formatLocal, processCounts, subagentsLabel } from "./dashboard.js";
 import {
@@ -2101,14 +2101,6 @@ function cmdPeek(argv: string[]): void {
   rejectUnknownFlags("peek", parsed, "none");
   const hit = resolveVisibilityTarget(parsed, "peek");
   if (hit) console.log(rexPeekBlock(hit.project.id, hit.name, hit.target));
-}
-
-function cmdRexLaunch(argv: string[]): void {
-  try {
-    const report = rexLaunchReport(Number(argv[0]), argv[1] ?? "", process.env.OSC7577_TOKEN);
-    if (report) writeSync(1, report);
-  } catch {}
-  process.exit(0);
 }
 
 function cmdRexResume(argv: string[]): void {
@@ -5007,7 +4999,6 @@ const COMMANDS = [
   LEAD_HANDOFF_GRACE_VERB,
   LEAD_HANDOFF_START_VERB,
   "lead-handoff",
-  REX_LAUNCH_VERB,
   REX_RESUME_VERB,
   "pads", "pad", "todos", "todo", "questions", "answer", "backups", "restore", "project", "runbook", "posture", "profile", "kickoff", "statusline",
 ];
@@ -5023,7 +5014,7 @@ if (!COMMANDS.includes(command)) {
     usage();
   }
 }
-if (command !== "upgrade" && command !== "crew" && command !== REX_LAUNCH_VERB && command !== REX_RESUME_VERB) migrate();
+if (command !== "upgrade" && command !== "crew" && command !== REX_RESUME_VERB) migrate();
 
 try {
   switch (command) {
@@ -5047,9 +5038,6 @@ try {
       break;
     case LEAD_PANE_EXITED_VERB:
       cmdLeadPaneExited(rest);
-      break;
-    case REX_LAUNCH_VERB:
-      cmdRexLaunch(rest);
       break;
     case REX_RESUME_VERB:
       cmdRexResume(rest);

@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import { cliPath } from "../dispatcher.js";
+import { isDefaultStore, storeDir } from "../dataDir.js";
 import {
   defaultRexServer,
   RexError,
@@ -836,12 +837,41 @@ export function commandArgv(command: string): string[] {
   return [REX_SHELL, "-c", command];
 }
 
-export const REX_LAUNCH_VERB = "__rex-launch";
 export const REX_LAUNCH_SCRIPT = '"$0" "$1" "$2" "$3" "$$"; shift 4; unset OSC7577_TOKEN; exec "$@"';
 export const hiveInvocation = (): string[] => [process.execPath, cliPath()];
+export const REX_RESUME_VERB = "__rex-resume";
+export const REX_RESUME_PID_ENV = "HIVE_REX_RESUME_PID";
+export const REX_RESUME_SCRIPT = `c=$(${REX_RESUME_PID_ENV}=$$ "$@" 3>&1 1>&2) && [ -n "$c" ] || c='exec "\${SHELL:-/bin/sh}"'; eval "$c"`;
+export const OSC7577_MAX_BYTES = 2048;
+const CONTROL_CHAR = /[\u0000-\u001f\u007f-\u009f]/;
+
+export function resumeDataDirArgs(): string[] {
+  const dir = storeDir();
+  return isDefaultStore(dir) ? [] : ["--data-dir", dir];
+}
+
+export function resumeRecordArgv(agentId: number): string[] {
+  return [REX_SHELL, "-c", REX_RESUME_SCRIPT, "hive", ...hiveInvocation(), REX_RESUME_VERB, String(agentId), ...resumeDataDirArgs()];
+}
+
+// Runs as `node -e` before the harness: loading hive's CLI here ate Rex's quick-exit window.
+export const REX_LAUNCH_JS = [
+  'const [p, i] = process.argv.slice(1), t = process.env.OSC7577_TOKEN || "";',
+  "if (/^[A-Za-z0-9_-]{22,64}$/.test(t) && /^[1-9]\\d*$/.test(i)) {",
+  'const h = "pid=" + i + ":time=" + Math.floor(Date.now() / 1000) + ":" + p;',
+  'const mac = require("crypto").createHash("sha256").update(h + ":" + t).digest("hex");',
+  'process.stdout.write("\\x1b]7577;" + h + ":mac=" + mac + "\\x1b\\\\"); }',
+].join(" ");
+
+export function rexLaunchPayload(agentId: number): string {
+  const argv = resumeRecordArgv(agentId);
+  const payload = `argv=${argv.map((a) => Buffer.from(a, "utf8").toString("base64")).join(",")}`;
+  const longest = `\x1b]7577;pid=${"9".repeat(10)}:time=${"9".repeat(12)}:${payload}:mac=${"0".repeat(64)}\x1b\\`;
+  return argv.some((a) => CONTROL_CHAR.test(a)) || Buffer.byteLength(longest) > OSC7577_MAX_BYTES ? "clear=1" : payload;
+}
 
 export function rexLaunchArgv(agentId: number, argv: string[]): string[] {
-  return [REX_SHELL, "-c", REX_LAUNCH_SCRIPT, ...hiveInvocation(), REX_LAUNCH_VERB, String(agentId), "--", ...argv];
+  return [REX_SHELL, "-c", REX_LAUNCH_SCRIPT, process.execPath, "-e", REX_LAUNCH_JS, rexLaunchPayload(agentId), "--", ...argv];
 }
 
 export const REX_ENV_PROGRAM = "/usr/bin/env";

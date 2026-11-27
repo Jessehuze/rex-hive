@@ -166,6 +166,30 @@ describe("Rex restart survival", () => {
     }
   });
 
+  it("the Rex launch step reports its record without loading hive's CLI or opening a store, so a quick death stays inside Rex's threshold", async () => {
+    const { worker } = await startProject("rex-light");
+    const command = fake.state().blocks[worker.tmux_target].command;
+    const sh = command.indexOf("/bin/sh");
+    const dashes = command.indexOf("--", sh + 3);
+    const launch = command.slice(sh, dashes + 1);
+    assert.ok(!launch.some((w) => w.endsWith(".js")), `the launch step runs no hive script: ${JSON.stringify(launch.slice(3))}`);
+    const token = "t".repeat(32);
+    const fresh = join(dirs.tmp, "launch-store-must-not-exist");
+    const run = spawnSync(launch[0], [...launch.slice(1), "/bin/echo", "HARNESS-RAN"], {
+      env: { PATH: rexEnv.PATH, OSC7577_TOKEN: token, HIVE_DATA_DIR: fresh },
+      encoding: "utf8",
+    });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /HARNESS-RAN/);
+    const [, body] = run.stdout.match(/\x1b\]7577;([^\x1b]*)\x1b\\/) ?? [];
+    assert.ok(body, JSON.stringify(run.stdout));
+    const cut = body.lastIndexOf(":mac=");
+    assert.equal(createHash("sha256").update(`${body.slice(0, cut)}:${token}`).digest("hex"), body.slice(cut + 5));
+    const argv = body.slice(0, cut).split(":").find((p) => p.startsWith("argv=")).slice(5).split(",").map((a) => Buffer.from(a, "base64").toString("utf8"));
+    assert.deepEqual(argv.slice(4), [process.execPath, CLI, "__rex-resume", String(worker.id), "--data-dir", dirs.dataDir]);
+    assert.equal(existsSync(fresh), false, "the launch step opened no store");
+  });
+
   it("__rex-resume for a closed row or a different block refuses and runs a shell", async () => {
     const { worker } = await startProject("rex-refuse");
     db.prepare("UPDATE agents SET session_id = 'sess-refuse' WHERE id = ?").run(worker.id);
