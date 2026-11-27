@@ -26,7 +26,7 @@ Tests spawn real MCP server and CLI processes against scratch directories; `test
 
 ## Fork: terminal seam
 
-This fork adds Rex as a second terminal beside tmux ([docs/rex.md](docs/rex.md)). Three rules keep upstream merges cheap:
+This fork adds Rex as a second terminal beside tmux ([docs/tmux.md#rex](docs/tmux.md#rex)). Three rules keep upstream merges cheap:
 - **The facade rule.** Call sites reach panes only through `src/terminal.ts`, which dispatches a `block:` target to `src/terminal/rex.ts` and anything else to the unchanged `src/tmux.ts`. Rex logic lives in new files (`src/terminal/`, `src/rex*.ts`); upstream files get import-path and one-line call-site changes only.
 - **The seam guard.** `test/rex-seam-guard.test.mjs` fails when a file imports a terminal-touching `tmux.js` export outside the facade, runs `tmux` or `rex` outside `src/tmux.ts`, `src/terminal*` and `src/rexCli.ts`, or reads `TMUX*`/`REX_*` outside the facade. A red guard after a merge means upstream added a pane call: route it through the facade, never widen the allowlist.
 - **Merging.** `git fetch upstream && git merge upstream/main`, never a rebase. The merge is done when `npm run build && npm test` passes, the upstream suite and every `test/rex-*.test.mjs` file alike. Never edit an upstream test file and never add a `MIGRATIONS` entry.

@@ -31,7 +31,7 @@ terminal: tmux                # optional; tmux (default) or rex. Read when a lea
                               # `hive setup --terminal`. Workers, processes and handoff
                               # successors keep their lead's terminal. A lead resolved to Rex
                               # refuses to start when rex is missing, its server is down, or the
-                              # server is too old; see docs/rex.md.
+                              # server is too old; see docs/tmux.md#rex.
 workers: shown                # optional; shown (default) or hidden: how new workers start
 agents: [claude, codex]       # optional allowed harness set for spawned crew; first entry is
                               # the default. Absent or empty means claude only, and agent_spawn

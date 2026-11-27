@@ -109,7 +109,7 @@ function reportResumeRule(r: DoctorReport): void {
     r.warn(
       "rex resume rule",
       "missing",
-      `no "${RESUME_RULE_NAME}" resume rule is in Rex's init.lua, so after a Rex restart hive blocks come back as shells and the janitor reaps their rows (docs/rex.md)`,
+      `no "${RESUME_RULE_NAME}" resume rule is in Rex's init.lua, so after a Rex restart hive blocks come back as shells and the janitor reaps their rows (docs/tmux.md#rex)`,
     );
   }
 }
