@@ -25,6 +25,7 @@ export function isolateRex(tmp, { ownerPid = process.pid } = {}) {
   process.env.REX_SERVER = `unix://${tmp}/fake-rex.sock`;
   process.env.FAKE_REX_STATE = statePath(tmp);
   process.env.FAKE_REX_OWNER = String(ownerPid);
+  process.env.REX_CONFIG = join(tmp, "rex-config", "init.lua");
   writeFileSync(
     statePath(tmp),
     JSON.stringify({ address: process.env.REX_SERVER, server: "running", revision: 0, sessions: [], windows: [], blocks: {}, closed: [], relays: [], performed: [] }),
@@ -44,6 +45,7 @@ export function isolateRex(tmp, { ownerPid = process.pid } = {}) {
         .split("\n")
         .filter(Boolean)
         .map((line) => JSON.parse(line)),
+    configPath: process.env.REX_CONFIG,
     cleanup: () => killAll(tmp),
   };
 }

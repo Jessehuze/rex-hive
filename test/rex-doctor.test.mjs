@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 
@@ -79,10 +79,12 @@ async function doctor(p, env = {}) {
     cwd: p.path,
     dataDir: dirs.dataDir,
     tmp: dirs.tmp,
-    env: { ...fake.env, HIVE_NO_UPDATE_CHECK: "1", CLAUDE_CONFIG_DIR: claudeDir, ...env },
+    env: { ...fake.env, ...doctorEnv, ...env },
   });
   return result.stdout;
 }
+
+const doctorEnv = { HIVE_NO_UPDATE_CHECK: "1", CLAUDE_CONFIG_DIR: claudeDir, HIVE_BIN_DIR: join(dirs.tmp, "no-dispatcher-bin") };
 
 const line = (out, label) => out.split("\n").find((l) => new RegExp(`^ {2}(?:ok {4}|warn {2}|FAIL {2}|info {2})${label}: `).test(l)) ?? null;
 
@@ -91,7 +93,9 @@ describe("hive doctor under Rex", () => {
     const p = await project("rex-doctor-section");
     const lead = newBlock(`${p.name}/lead`);
     insertRow(p, { name: "lead", kind: "lead", target: lead.block, pid: lead.pid });
-    fakeRexDo(dirs.tmp, "setServerInfo", { resume_rules: ["hive"], rex_version: "0.1.0-test" });
+    fakeRexDo(dirs.tmp, "setServerInfo", { rex_version: "0.1.0-test" });
+    const installed = await runCli(["setup", "--rex-resume", "--install"], { cwd: p.path, dataDir: dirs.dataDir, tmp: dirs.tmp, env: { ...fake.env, ...doctorEnv } });
+    assert.equal(installed.code, 0, installed.stdout + installed.stderr);
     claudeSettings("/bin/sh -c 'rex __internal session-start --agent claude --feature-session-naming=true 2>/dev/null || true'");
     try {
       const out = await doctor(p, { HIVE_TERMINAL: "rex" });
@@ -102,13 +106,14 @@ describe("hive doctor under Rex", () => {
       assert.equal(line(out, "rex resume rule"), "  ok    rex resume rule: installed");
       assert.equal(line(out, "rex session naming hook"), "  warn  rex session naming hook: ON (workers may rename your session)");
 
-      fakeRexDo(dirs.tmp, "setServerInfo", { resume_rules: [] });
+      writeFileSync(fake.configPath, "");
       claudeSettings("/bin/sh -c 'rex __internal session-start --agent claude --feature-session-naming=false 2>/dev/null || true'");
       const off = await doctor(p, { HIVE_TERMINAL: "rex" });
       assert.equal(line(off, "rex resume rule"), "  warn  rex resume rule: missing");
       assert.equal(line(off, "rex session naming hook"), "  ok    rex session naming hook: off");
     } finally {
-      fakeRexDo(dirs.tmp, "setServerInfo", { resume_rules: [], rex_version: "0.0.0-fake" });
+      fakeRexDo(dirs.tmp, "setServerInfo", { rex_version: "0.0.0-fake" });
+      rmSync(fake.configPath, { force: true });
       claudeSettings(null);
       closeRunningRows();
     }
@@ -273,13 +278,15 @@ describe("a lead resolved to Rex refuses when Rex cannot serve it", () => {
 });
 
 describe("doctor's Rex config readers", () => {
-  it("reads only rule-name lines under resume rules, so a command line naming hive is not the rule", async () => {
-    const { resumeRuleInstalled, resumeRuleNames } = await import("../dist/rexDoctor.js");
-    const { REX_RESUME_RULE_NAME } = await import("../dist/rexResume.js");
-    const commandOnly = "resume rules: 1\n  claude (built in)\n    command: /bin/sh -c hive (x)\nbindings: 1\n  hive (init.lua:9)\n";
-    assert.deepEqual(resumeRuleNames(commandOnly), ["claude"]);
-    assert.equal(resumeRuleInstalled(commandOnly), false);
-    assert.equal(resumeRuleInstalled(`resume rules: 2\n  claude (built in)\n  ${REX_RESUME_RULE_NAME} (init.lua:38)\n    command: x\n`), true);
+  it("compares a rule's command word for word, accepts any rex.match placeholder in the id slot, and names the first word that differs", async () => {
+    const { ruleDifference } = await import("../dist/rexResumeRule.js");
+    const expected = ["/bin/sh", "-c", "script", "hive", "/pinned/hive", "__rex-resume", { match: "id" }];
+    assert.equal(ruleDifference(["/bin/sh", "-c", "script", "hive", "/pinned/hive", "__rex-resume", { match: "id" }], expected), null);
+    assert.equal(ruleDifference(["/bin/sh", "-c", "script", "hive", "/old/node", "/old/cli.js", "__rex-resume", { match: "id" }], expected), "names /old/node");
+    assert.equal(ruleDifference(["/bin/sh", "-c", "script", "hive", "/pinned/hive", "__rex-resume", "rex.match.id"], expected), "names rex.match.id");
+    assert.equal(ruleDifference(["/bin/sh", "-c", "script", "hive", "/pinned/hive"], expected), "lacks __rex-resume");
+    assert.equal(ruleDifference([...expected, "--data-dir"], expected), "names --data-dir");
+    assert.equal(ruleDifference("not a list", expected), "a command that is not a list");
   });
 
   it("reads --feature-session-naming false with a space, =false and a quoted false as off, and every other spelling as on", async () => {

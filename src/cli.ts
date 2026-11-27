@@ -214,6 +214,7 @@ import { resumeWorker, validateResumeWorker } from "./agentResume.js";
 import { markWorkerLost } from "./workerRecovery.js";
 import { rexCallerBlock } from "./rexCli.js";
 import { REX_RESUME_PID_ENV, REX_RESUME_RULE_NAME, REX_RESUME_VERB, rexResumeLine, rexResumeTrustRule } from "./rexResume.js";
+import { installRexResumeRule, REX_RULE_INSTALL, REX_RULE_UNINSTALL, RexRuleRefusal, resumeRuleState, uninstallRexResumeRule } from "./rexResumeRule.js";
 import type { AgentRow } from "./agentRecords.js";
 import { describeProcess, formatLocal, processCounts, subagentsLabel } from "./dashboard.js";
 import {
@@ -352,7 +353,8 @@ ${rex ? `  hive setup --terminal <t>  tmux|rex: the terminal a new lead starts i
                              HIVE_TERMINAL and a project's hive.yml win over it
   hive setup --rex-resume    print the Rex init.lua trust rule that lets Rex
                              resume hive leads and workers after a restart;
-                             writes nothing to Rex's config
+                             --install writes it into init.lua between marker
+                             lines and reloads Rex, --uninstall removes it
 ` : ""}  hive doctor [--strict] [--verbose]
                              check the environment and clean up stale state;
                              --strict also exits non-zero on warnings that mean
@@ -2117,12 +2119,31 @@ function cmdRexResume(argv: string[]): void {
 }
 
 function printRexResumeRule(): void {
-  console.log("Add this to Rex's init.lua so Rex resumes hive leads and workers after a restart");
-  console.log("with their hive identity. hive never edits init.lua. Then run: rex config reload\n");
+  console.log(`Install this rule with one command: ${REX_RULE_INSTALL}`);
+  console.log("It lets Rex resume hive leads and workers after a restart with their hive identity. hive edits");
+  console.log("Rex's init.lua only when you run that command: it writes the rule between marker lines, checks the");
+  console.log("file with rex config check, then runs rex config reload. Or add it yourself, then run rex config reload:\n");
   console.log(rexResumeTrustRule());
-  console.log(`\nTo remove it, delete those lines, or add rex.set("resume.trust.${REX_RESUME_RULE_NAME}", false), then rex config reload.`);
+  console.log(`\nTo remove it: ${REX_RULE_UNINSTALL}, or delete those lines, or add rex.set("resume.trust.${REX_RESUME_RULE_NAME}", false), then rex config reload.`);
   console.log("Without it, a restored hive block comes back as a shell: hive closes a worker's row so crew-restore");
   console.log("can bring it back, and a lead reads reissued until hive lead restarts it.");
+}
+
+function cmdRexResumeRule(install: boolean, uninstall: boolean): void {
+  if (!install && !uninstall) return printRexResumeRule();
+  try {
+    for (const line of install ? installRexResumeRule() : uninstallRexResumeRule()) console.log(line);
+  } catch (e) {
+    if (!(e instanceof RexRuleRefusal)) throw e;
+    console.error(`hive setup --rex-resume: ${e.message}`);
+    process.exit(1);
+  }
+}
+
+function reportStaleRexResumeRule(): void {
+  if (!rexActive()) return;
+  const rule = resumeRuleState();
+  if (rule.state === "stale") console.log(`\n! Rex's hive resume rule is stale (${rule.detail}); update it with: ${REX_RULE_INSTALL}`);
 }
 
 const LEAD_PANE_EXITED_HOOK = "pane-exited";
@@ -2635,10 +2656,16 @@ function cmdUpgrade(argv: string[]): void {
 }
 
 function cmdSetup(argv: string[]): void {
-  const parsed = parseArgs(argv, { flags: ["--force", "--rex-resume"], valued: ["--dir", "--attach", "--auto-attach", "--terminal"] });
-  rejectUnknownFlags("setup", parsed, rexActive() ? "--dir, --attach, --auto-attach, --force. Also --terminal tmux|rex and --rex-resume" : "--dir, --attach, --auto-attach, --force");
+  const parsed = parseArgs(argv, { flags: ["--force", "--rex-resume", "--install", "--uninstall"], valued: ["--dir", "--attach", "--auto-attach", "--terminal"] });
+  rejectUnknownFlags("setup", parsed, rexActive() ? "--dir, --attach, --auto-attach, --force. Also --terminal tmux|rex and --rex-resume [--install|--uninstall]" : "--dir, --attach, --auto-attach, --force");
   requireFlagValues("setup", parsed);
-  if (parsed.flags.has("--rex-resume")) return printRexResumeRule();
+  const install = parsed.flags.has("--install");
+  const uninstall = parsed.flags.has("--uninstall");
+  if ((install || uninstall) && (!parsed.flags.has("--rex-resume") || (install && uninstall))) {
+    console.error(`hive setup: ${install && uninstall ? "use --install or --uninstall, not both" : `${install ? "--install" : "--uninstall"} goes with --rex-resume`}.`);
+    process.exit(1);
+  }
+  if (parsed.flags.has("--rex-resume")) return cmdRexResumeRule(install, uninstall);
 
   const dir = parsed.values.has("--dir") ? resolve(parsed.values.get("--dir") ?? "") : dispatcherDir();
   const file = join(dir, "hive");
@@ -2742,6 +2769,7 @@ function cmdSetup(argv: string[]): void {
   console.log("checkouts print the recipe and run it only with --run.");
   console.log(`\nPATH: ${pathAdvice(dir, file).join("\n")}`);
   reportSetupRegistrations(node);
+  reportStaleRexResumeRule();
 }
 
 function reportSetupRegistrations(pinned: string): void {

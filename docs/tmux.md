@@ -177,13 +177,14 @@ Rex session
 After a restart, Rex restores blocks and re-runs each program's registered resume command. For a hive pane that must be hive's own resume command, never Claude Code's, or a worker would come back as a live Claude session without its hive identity or project lock.
 
 - Every Rex launch of a hive lead or worker registers `hive __rex-resume <agent id>` as its resume command and stops the harness from registering its own, so the only thing Rex can re-run is hive's resume.
-- Rex runs a resume command only when a rule in your `init.lua` trusts it, and hive never edits `init.lua`. To set it up, run `hive setup --rex-resume`, append the rule it prints (named `hive`) to `init.lua` yourself, then run `rex config reload`. To remove it, delete those lines and reload again.
-- `hive doctor` reports it on the `rex resume rule` line, read from the rule names `rex config check` lists (`resumeRuleNames`, `src/rexDoctor.ts:52`).
+- Rex runs a resume command only when a rule in your `init.lua` trusts it. Install the rule (named `hive`) with `hive setup --rex-resume --install`. That is the only time hive edits `init.lua`. It writes the rule between `-- >>> hive resume rule` and `-- <<< hive resume rule` marker lines, replacing an earlier marked block, checks the edited file with `rex config check` before it replaces `init.lua`, then runs `rex config reload` (`installRexResumeRule`, `src/rexResumeRule.ts:131`). It refuses if `init.lua` already sets `resume.trust.hive` outside the markers. `hive setup --rex-resume --uninstall` removes the block. Bare `hive setup --rex-resume` prints the rule if you would rather add it yourself.
+- The record and the rule name the pinned dispatcher (`~/.local/bin/hive`, or `$HIVE_BIN_DIR/hive`) when it is hive's own and pinned to this build (`hiveCommand`, `src/dispatcher.ts:52`), and `[node, dist/cli.js]` otherwise. Re-pinning with `hive setup` after a Node upgrade rewrites the dispatcher without moving it, so the rule stays valid. A block launched before a change to the command keeps the record it was launched with, so it resumes only after it is relaunched.
+- `hive doctor` reports it on the `rex resume rule` line by comparing the rule `rex config check --json` lists with the command hive records now (`resumeRuleState`, `src/rexResumeRule.ts:57`). When Rex is the terminal and the installed rule is stale, `hive setup` (and so `hive upgrade`, which runs it) prints the install command. It never edits `init.lua` itself.
 - Without the rule, restored hive blocks come back as shells: hive closes a worker's row as lost, so `hive crew-restore` can bring it back, and a lead's row reads reissued until `hive lead` restarts it.
 
 ### Doctor
 
-`hive doctor` prints a Rex section when the effective terminal is Rex or any running row is on Rex (`rexDoctorSection`, `src/rexDoctor.ts:187`):
+`hive doctor` prints a Rex section when the effective terminal is Rex or any running row is on Rex (`rexDoctorSection`, `src/rexDoctor.ts:165`):
 
 | Line | Means |
 |---|---|
@@ -191,8 +192,8 @@ After a restart, Rex restores blocks and re-runs each program's registered resum
 | `rex: <path>` | where `rex` resolves on PATH; FAIL when it does not |
 | `rex server: reachable, version V, api_revision N (minimum M)` | from `rex whoami --json`; FAIL when unreachable, warn when N is below M |
 | `rex blocks: K owned, G rows gone, O orphan blocks` | rows whose block is open, rows whose block is gone, and blocks labelled `<project>/…` with no row, each named with the `rex block close` command to clear it |
-| `rex resume rule: installed\|missing` | the restart-survival trust rule above |
-| `rex session naming hook: off\|ON (workers may rename your session)` | whether Rex's SessionStart hook in a Claude settings file tells agents to name the session after their task (`sessionNamingOn`, `src/rexDoctor.ts:84`); with it ON, every worker may rename your session |
+| `rex resume rule: installed\|missing\|stale: names <word>\|unknown` | the restart-survival trust rule above; stale names the first word of the installed rule that differs from what hive records now, and missing and stale both name `hive setup --rex-resume --install` |
+| `rex session naming hook: off\|ON (workers may rename your session)` | whether Rex's SessionStart hook in a Claude settings file tells agents to name the session after their task (`sessionNamingOn`, `src/rexDoctor.ts:69`); with it ON, every worker may rename your session |
 | `rex reap` (info) | pending block reaps whose server has not answered for over 10 minutes, cleared (`rexClearStaleReaps`, `src/terminal/rex.ts:1110`) |
 
 tmux-only checks (the `tmux` version, `NO_COLOR`, scratch tmux servers, sessions, window stamps, view sessions) run only when tmux is the effective terminal or a running row is on tmux. A tmux-only setup's doctor output is unchanged.

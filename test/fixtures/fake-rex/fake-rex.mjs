@@ -1,7 +1,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -1021,7 +1021,7 @@ function fakeOp(op, raw) {
         state.perform_error = args.perform_error ?? null;
         return {};
       case "setServerInfo":
-        for (const key of ["api_revision", "rex_version", "resume_rules"]) if (args[key] !== undefined) state[key] = args[key];
+        for (const key of ["api_revision", "rex_version", "config_ignores_trust"]) if (args[key] !== undefined) state[key] = args[key];
         return {};
       case "setPorts": {
         const block = state.blocks[args.block_id];
@@ -1071,6 +1071,78 @@ function emit(value, silent = false) {
   if (!silent) process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
+const BUILT_IN_RULES = [{ name: "claude", built_in: true, source: "built in", rule: { command: ["claude", "--resume", { match: "uuid" }], flags: {} } }];
+const TRUST_SET = /rex\.set\(\s*"resume\.trust\.([A-Za-z0-9_-]+)"\s*,\s*/g;
+
+function accountConfigPath() {
+  const env = process.env;
+  return resolve(env.REX_CONFIG || join(env.XDG_CONFIG_HOME || join(env.HOME ?? "", ".config"), "rex", "init.lua"));
+}
+
+function insideScratch(path) {
+  if (!resolve(path).startsWith(`${DIR}/`)) fail("bad_request", `fake rex: config path ${path} is outside the scratch dir ${DIR}; isolateRex sets REX_CONFIG`);
+  return resolve(path);
+}
+
+function luaCommand(text, at) {
+  const open = /^\{[\s\S]*?command\s*=\s*\{/.exec(text.slice(at));
+  if (!open) return null;
+  const words = [];
+  let i = at + open[0].length;
+  for (;;) {
+    while (/[\s,]/.test(text[i] ?? "")) i++;
+    if (text[i] === "}") return words;
+    if (text[i] === '"') {
+      let word = "";
+      for (i++; text[i] !== '"'; i++) {
+        if (i >= text.length) return null;
+        word += text[i] === "\\" ? text[++i] : text[i];
+      }
+      i++;
+      words.push(word);
+      continue;
+    }
+    const match = /^rex\.match\.([a-z]+)/.exec(text.slice(i));
+    if (!match) return null;
+    words.push({ match: match[1] });
+    i += match[0].length;
+  }
+}
+
+function loadConfig(path, state) {
+  const exists = existsSync(path);
+  const text = exists ? readFileSync(path, "utf8") : "";
+  const lineAt = (index) => text.slice(0, index).split("\n").length;
+  const diagnostics = text
+    .split("\n")
+    .flatMap((l, i) => (l.includes("--fake-rex:error") ? [{ severity: "error", source: `${basename(path)}:${i + 1}`, message: "fake rex: error marker" }] : []));
+  const rules = new Map();
+  const omitted = [];
+  for (const m of text.matchAll(TRUST_SET)) {
+    const at = m.index + m[0].length;
+    const source = `${basename(path)}:${lineAt(m.index)}`;
+    if (text.startsWith("false", at)) {
+      if (rules.has(m[1])) omitted.push({ ...rules.get(m[1]), omitted_by: source });
+      rules.delete(m[1]);
+      continue;
+    }
+    const command = luaCommand(text, at);
+    if (!command) diagnostics.push({ severity: "error", source, message: `resume.trust.${m[1]}: command is not a list of strings and rex.match placeholders` });
+    else rules.set(m[1], { name: m[1], built_in: false, source, rule: { command, flags: {} } });
+  }
+  const own = state.config_ignores_trust ? [] : [...rules.values()];
+  return { path, exists, bindings: 0, removals: 0, modes: 0, actions: 0, settings: [], removed_settings: [], settings_incomplete: false, resume_rules: [...BUILT_IN_RULES, ...own], resume_rules_omitted: omitted, diagnostics };
+}
+
+function configCheck(tail) {
+  const f = flags(tail, { "--json": "json?" });
+  const path = insideScratch(f._[0] ?? accountConfigPath());
+  const report = loadConfig(path, readState());
+  if (f.json) emit(report);
+  else process.stdout.write(`config: ${path}\nresume rules: ${report.resume_rules.length}\n${report.resume_rules.map((r) => `  ${r.name} (${r.source})\n`).join("")}`);
+  return report.diagnostics.some((d) => d.severity === "error") ? 1 : 0;
+}
+
 function main(argv) {
   appendFileSync(CALLS, `${JSON.stringify({ argv, pid: process.pid, t: Date.now() })}\n`);
   if (argv[0] === "__fake") {
@@ -1099,6 +1171,7 @@ function main(argv) {
     process.stderr.write("Error: fake slow failure\n");
     return 1;
   }
+  if (rest[0] === "config" && rest[1] === "check") return configCheck(rest.slice(2));
   const state = readState();
   const server = global.server ?? process.env.REX_SERVER ?? state.address;
   if (state.server !== "running" || server !== state.address) {
@@ -1185,9 +1258,11 @@ function main(argv) {
       return waitFor(f._[0], f.for, f.json);
     }
     case "config": {
-      if (tail[0] !== "check") fail("bad_request", `the fake supports only config check, not config ${tail[0]}`);
-      const rules = [["claude", "built in", "claude --resume <uuid>"], ...(state.resume_rules ?? []).map((name, i) => [name, `init.lua:${38 + i}`, `/bin/sh -c "exec hive" hive __rex-resume <id>`])];
-      process.stdout.write(`config: ${join(DIR, "init.lua")}\nresume rules: ${rules.length}\n${rules.map(([n, at, c]) => `  ${n} (${at})\n    command: ${c}\n`).join("")}`);
+      if (tail[0] !== "reload") fail("bad_request", `the fake supports only config check and config reload, not config ${tail[0]}`);
+      const path = insideScratch(accountConfigPath());
+      withLock((s) => {
+        s.config_reloads = [...(s.config_reloads ?? []), { path, rules: loadConfig(path, s).resume_rules.map((r) => r.name) }];
+      });
       return 0;
     }
     case "do": {
