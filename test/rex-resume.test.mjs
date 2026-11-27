@@ -17,6 +17,7 @@ const rexEnv = Object.fromEntries(Object.entries(fake.env).filter(([k]) => !k.st
 
 const { db, migrate } = await import("../dist/db.js");
 migrate();
+await import("../dist/rexInUse.js");
 const terminal = await import("../dist/terminal.js");
 const { REX_RESUME_SCRIPT } = await import("../dist/rexResume.js");
 const { rexApi } = await import("../dist/rexCli.js");
@@ -115,6 +116,8 @@ function runResume(agentId, block, shellMarker) {
 function startResume(agentId, block) {
   return spawn("/bin/sh", ["-c", REX_RESUME_SCRIPT, "hive", ...resumeArgs(agentId)], { env: resumeEnv(block), stdio: "ignore", detached: true });
 }
+
+const parentPid = (pid) => spawnSync("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
 
 function killGroup(child) {
   try {
@@ -285,7 +288,7 @@ describe("Rex restart survival", () => {
     assert.equal(row.status, "running");
     assert.equal(row.tmux_target, worker.tmux_target);
     assert.equal(row.pane_pid, resumed.pid, "the row records the restored harness's pid");
-    assert.equal(String(state.blocks[row.tmux_target].child_pid), resumed.pid, "which is the block's own process");
+    assert.equal(parentPid(resumed.pid), String(state.blocks[row.tmux_target].child_pid), "a child of the block's shell, as under Rex's wrapper");
     assert.notEqual(row.pane_started_at, null);
     assert.equal(resumed.env.HIVE_AGENT_ID, worker.actor_id);
     assert.equal(resumed.env.HIVE_PROJECT_LOCK, "1");
@@ -301,6 +304,37 @@ describe("Rex restart survival", () => {
     assert.equal(leadDump.env.HIVE_LEAD, "1");
     assert.deepEqual(leadDump.argv.slice(-2), ["--resume", `sess-${lead.id}`]);
     assert.equal(terminal.rowOwnership(leadNow), "live");
+
+    db.prepare("UPDATE agents SET created_at = datetime('now', '-1 hour') WHERE id = ?").run(worker.id);
+    for (let tick = 0; tick < 3; tick++) {
+      const status = await runCli(["status"], { cwd: started.dir, dataDir: dirs.dataDir, tmp: dirs.tmp, env: rexEnv });
+      assert.equal(status.code, 0, status.stdout + status.stderr);
+    }
+    assert.equal(rowById(worker.id).status, "running", "three janitor ticks leave the resumed worker running");
+    assert.equal(terminal.rowOwnership(rowById(worker.id)), "live");
+    assert.equal(terminal.rowOwnership(rowById(lead.id)), "live");
+  });
+
+  it("when a resumed harness exits under Rex's wrapper, its row is a lost worker and the block's shell stays open", async () => {
+    const started = await startProject("rex-exit");
+    const { worker } = started;
+    giveSessions(started);
+    fakeRexDo(dirs.tmp, "restartServer", { trust: true, env: { PATH: CLAUDE_PATH } });
+    await waitFor(() => dumpsOf(worker.name).length === 2, { timeoutMs: 15000 });
+    await waitFor(() => rowById(worker.id).pane_pid !== worker.pane_pid);
+    const resumedPid = rowById(worker.id).pane_pid;
+    const shellPid = fake.state().blocks[worker.tmux_target].child_pid;
+    await killAndWait(resumedPid);
+    db.prepare("UPDATE agents SET created_at = datetime('now', '-1 hour') WHERE id = ?").run(worker.id);
+    const status = await runCli(["status"], { cwd: started.dir, dataDir: dirs.dataDir, tmp: dirs.tmp, env: rexEnv });
+    assert.equal(status.code, 0, status.stdout + status.stderr);
+    const row = rowById(worker.id);
+    assert.equal(row.status, "closed");
+    assert.equal(row.recovery_state, "pending", "as a lost worker crew-restore can bring back");
+    const block = fake.state().blocks[worker.tmux_target];
+    assert.ok(block, "the block was not closed");
+    assert.equal(block.child_pid, shellPid);
+    assert.doesNotThrow(() => process.kill(shellPid, 0), "the user's shell in the block still runs");
   });
 
   it("__rex-resume brings a worker the janitor marked lost mid-restart back to running in its own block", async () => {

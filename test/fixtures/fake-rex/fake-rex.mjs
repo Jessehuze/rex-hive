@@ -171,11 +171,24 @@ function resumeRecord(block) {
     const head = body.slice(0, cut);
     if (createHash("sha256").update(`${head}:${block.token}`).digest("hex") !== body.slice(cut + 5)) continue;
     const pairs = Object.fromEntries(head.split(":").map((p) => [p.slice(0, p.indexOf("=")), p.slice(p.indexOf("=") + 1)]));
-    if (Math.abs(Date.now() / 1000 - Number(pairs.time)) > RESUME_TIME_WINDOW_S || Number(pairs.pid) !== block.child_pid) continue;
+    if (Math.abs(Date.now() / 1000 - Number(pairs.time)) > RESUME_TIME_WINDOW_S || !inBlock(block, Number(pairs.pid))) continue;
     record = pairs.clear === "1" ? null : { argv: pairs.argv.split(",").map((a) => Buffer.from(a, "base64").toString("utf8")) };
   }
   return record;
 }
+
+function parentOf(pid) {
+  try {
+    return Number(execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8" }).trim());
+  } catch {
+    return 0;
+  }
+}
+
+const inBlock = (block, pid) => pid === block.child_pid || (block.restored && parentOf(pid) === block.child_pid);
+
+// Rex runs a resumed record in a subshell of the user's shell, which stays the block's process.
+const REX_RUN_WRAPPER = 'trap : INT; ( shift 2; exec "$@" ) || :; exec "$1"';
 
 const newToken = () => randomBytes(24).toString("base64url");
 
@@ -956,7 +969,7 @@ function fakeOp(op, raw) {
           const record = resumeRecord(block);
           killProcess(block);
           forgetRelay(state, block);
-          block.command = args.trust === true && record ? record.argv : ["/bin/sh"];
+          block.command = args.trust === true && record ? ["/bin/sh", "-c", REX_RUN_WRAPPER, "rex-run", "/bin/sh", "/bin/sh", ...record.argv] : ["/bin/sh"];
           block.restored = true;
           block.fresh_env = freshEnv(args.env ?? {});
           startProcess(state, block);

@@ -15,7 +15,7 @@ import { FIRST_MESSAGE_SHA_ENV } from "./firstMessage.js";
 import { loadProjectYml } from "./projectYml.js";
 import { shellQuote } from "./tmux.js";
 import { ACTIVE_TIMER_WHERE, socketAwaitingWhere } from "./wakeSql.js";
-import { commandArgv, hiveInvocation, REX_SHELL, REX_SOCKET_PREFIX, rexBlockCommand, rexLaunchArgv } from "./terminal/rex.js";
+import { commandArgv, hiveInvocation, REX_SHELL, REX_SOCKET_PREFIX, rexBlockCommand, rexLaunchArgv, rexResumedUnderKey } from "./terminal/rex.js";
 
 export const REX_RESUME_VERB = "__rex-resume";
 export const REX_RESUME_PID_ENV = "HIVE_REX_RESUME_PID";
@@ -144,33 +144,49 @@ function leadLaunch(row: AgentRow, projectPath: string): ResumeLaunch {
   };
 }
 
+function recordResumeAnchor(row: AgentRow, pid: string, shell: string | null): void {
+  const key = rexResumedUnderKey(row.tmux_target);
+  if (!shell) return void db.prepare("DELETE FROM kv WHERE project_id = ? AND key = ?").run(row.project_id, key);
+  db.prepare(
+    `INSERT INTO kv (project_id, key, value, updated_by) VALUES (?, ?, ?, 'hive')
+     ON CONFLICT (project_id, key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
+  ).run(row.project_id, key, JSON.stringify({ shell, pid }));
+}
+
 function recordResumedPid(row: AgentRow, pid: string, command: string, pending: boolean): boolean {
+  const shell = psField(pid, "ppid");
   return db.transaction(() => {
-    if (row.kind === LEAD_KIND) {
-      const changed = db
-        .prepare(
-          "UPDATE agents SET pane_pid = ?, pane_started_at = strftime('%Y-%m-%d %H:%M:%f', 'now') " +
-            "WHERE id = ? AND kind = ? AND status = 'running' AND tmux_target = ? AND tmux_socket = ? AND pane_pid = ?",
-        )
-        .run(pid, row.id, LEAD_KIND, row.tmux_target, row.tmux_socket, row.pane_pid).changes > 0;
-      if (changed) {
-        db.prepare(
-          `UPDATE wakes SET deliver_pane = ?, held_at = NULL, held_reason = NULL
-           WHERE ((${ACTIVE_TIMER_WHERE}) OR (${socketAwaitingWhere()})) AND deliver_actor = ?`,
-        ).run(row.tmux_target, row.actor_id);
-      }
-      return changed;
-    }
-    return db
-      .prepare(
-        "UPDATE agents SET status = 'running', closed_at = NULL, recovery_state = '', pane_pid = ?, command = ?, " +
-          "pane_started_at = strftime('%Y-%m-%d %H:%M:%f', 'now'), resumed_at = datetime('now'), " +
-          "agent_state = 'unknown', state_changed_at = NULL " +
-          "WHERE id = ? AND tmux_target = ? AND tmux_socket = ? AND pane_pid = ? AND " +
-          (pending ? "status = 'closed' AND recovery_state = 'pending' AND parked_at = ''" : "status = 'running'"),
-      )
-      .run(pid, command, row.id, row.tmux_target, row.tmux_socket, row.pane_pid).changes > 0;
+    const changed = recordRowPid(row, pid, command, pending);
+    if (changed) recordResumeAnchor(row, pid, shell && /^[1-9]\d*$/.test(shell) ? shell : null);
+    return changed;
   }).immediate();
+}
+
+function recordRowPid(row: AgentRow, pid: string, command: string, pending: boolean): boolean {
+  if (row.kind === LEAD_KIND) {
+    const changed = db
+      .prepare(
+        "UPDATE agents SET pane_pid = ?, pane_started_at = strftime('%Y-%m-%d %H:%M:%f', 'now') " +
+          "WHERE id = ? AND kind = ? AND status = 'running' AND tmux_target = ? AND tmux_socket = ? AND pane_pid = ?",
+      )
+      .run(pid, row.id, LEAD_KIND, row.tmux_target, row.tmux_socket, row.pane_pid).changes > 0;
+    if (changed) {
+      db.prepare(
+        `UPDATE wakes SET deliver_pane = ?, held_at = NULL, held_reason = NULL
+         WHERE ((${ACTIVE_TIMER_WHERE}) OR (${socketAwaitingWhere()})) AND deliver_actor = ?`,
+      ).run(row.tmux_target, row.actor_id);
+    }
+    return changed;
+  }
+  return db
+    .prepare(
+      "UPDATE agents SET status = 'running', closed_at = NULL, recovery_state = '', pane_pid = ?, command = ?, " +
+        "pane_started_at = strftime('%Y-%m-%d %H:%M:%f', 'now'), resumed_at = datetime('now'), " +
+        "agent_state = 'unknown', state_changed_at = NULL " +
+        "WHERE id = ? AND tmux_target = ? AND tmux_socket = ? AND pane_pid = ? AND " +
+        (pending ? "status = 'closed' AND recovery_state = 'pending' AND parked_at = ''" : "status = 'running'"),
+    )
+    .run(pid, command, row.id, row.tmux_target, row.tmux_socket, row.pane_pid).changes > 0;
 }
 
 export function rexResumeLine(agentId: number, pid: string | undefined, block: string | undefined): string {

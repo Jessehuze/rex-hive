@@ -478,8 +478,35 @@ export function rexSnapshot(server?: string | null, extraBlocks: string[] = []):
       probed: entry.probed === true && entry.process !== undefined,
     });
   }
+  if (store !== null) bestEffort(() => applyResumeAnchors(blocks));
   const incomplete = reply.incomplete === true || missingBlocksStillOpen(resolved, wanted.filter((id) => !blocks.has(id)));
   return { answered: true, server: resolved, incomplete, unreachableSince: null, blocks };
+}
+
+export const rexResumedUnderKey = (target: string): string => `terminal:rex:resumed-under:${target}`;
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+// A restored block's process is the user's shell; while the resumed harness under it lives, report the harness.
+function applyResumeAnchors(blocks: Map<string, RexBlock>): void {
+  const ids = [...blocks.keys()];
+  if (ids.length === 0) return;
+  const rows = sql()
+    .prepare(`SELECT key, value FROM kv WHERE key IN (${ids.map(() => "?").join(", ")})`)
+    .all(...ids.map(rexResumedUnderKey)) as { key: string; value: string }[];
+  for (const { key, value } of rows) {
+    const block = blocks.get(key.slice(rexResumedUnderKey("").length));
+    const anchor = guarded(() => JSON.parse(value) as { shell?: unknown; pid?: unknown }, {});
+    if (!block || block.exited || typeof anchor.pid !== "string" || block.pid !== anchor.shell || !/^[1-9]\d*$/.test(anchor.pid)) continue;
+    if (pidAlive(Number(anchor.pid))) Object.assign(block, { pid: anchor.pid, argv: "", programs: [] });
+  }
 }
 
 function missingBlocksStillOpen(server: string, missing: string[]): boolean {
