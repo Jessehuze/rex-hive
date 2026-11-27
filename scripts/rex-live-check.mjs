@@ -3,7 +3,7 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -769,12 +769,51 @@ Restart phase armed; state in ${RESTART_STATE}. Do NOT expect this script to edi
   }
 }
 
+const LAYOUT = { dataDir: "data", proj: "proj", untrusted: "untrusted", bin: "bin", log: "rex-calls.log", probe: "probe-rex-server", tmux: "tmux" };
+
+async function stateProblem(state) {
+  const paths = state?.paths;
+  if (typeof paths?.base !== "string") return "it names no scratch base";
+  let base;
+  try {
+    base = realpathSync(paths.base);
+  } catch {
+    return `its scratch base ${paths.base} does not exist`;
+  }
+  if (base !== paths.base || dirname(base) !== realpathSync(tmpdir()) || !/^hive-live-[A-Za-z0-9]+$/.test(basename(base))) {
+    return `its scratch base ${paths.base} is not a hive-live-* directory directly under ${realpathSync(tmpdir())}`;
+  }
+  for (const [key, name] of Object.entries(LAYOUT)) {
+    if (paths[key] !== join(base, name)) return `its ${key} path ${paths[key]} is not ${join(base, name)}`;
+  }
+  if (typeof state.endpoint !== "string" || !state.endpoint) return "it names no Rex endpoint";
+  if (!Array.isArray(state.before) || !Array.isArray(state.rows)) return "it has no before-list or rows";
+  if (typeof state.liveLabel !== "string" || !/^hive-live-\d+$/.test(state.liveLabel)) return `its live label ${state.liveLabel} is not hive-live-<pid>`;
+  process.env.HIVE_DATA_DIR = paths.dataDir;
+  const leadLabel = (await load("tmux.js")).sessionName();
+  if (state.leadLabel !== leadLabel) return `its lead label ${state.leadLabel} is not ${leadLabel}, the one hive derives from its data dir`;
+  if (!Array.isArray(state.created) || state.created.length === 0) return "it records no created sessions";
+  for (const entry of state.created) {
+    if (!Array.isArray(entry) || typeof entry[0] !== "string" || ![state.liveLabel, leadLabel].includes(entry[1])) return `it records a session this script never creates: ${JSON.stringify(entry)}`;
+  }
+  return null;
+}
+
 async function restartVerify() {
   if (!existsSync(RESTART_STATE)) {
     console.error(`no restart state at ${RESTART_STATE}; run once with HIVE_LIVE_RESTART=1 first`);
     return 1;
   }
-  const state = JSON.parse(readFileSync(RESTART_STATE, "utf8"));
+  let state = null;
+  try {
+    state = JSON.parse(readFileSync(RESTART_STATE, "utf8"));
+  } catch {}
+  const problem = await stateProblem(state);
+  if (problem) {
+    console.error(`refusing --restart-verify: the state file ${RESTART_STATE} fails validation: ${problem}`);
+    console.error("nothing was written, killed or removed. Inspect that file, kill any session of yours it names with rex kill <id>, then delete it.");
+    return 1;
+  }
   ctx.paths = state.paths;
   ctx.liveLabel = state.liveLabel;
   ctx.leadLabel = state.leadLabel;
