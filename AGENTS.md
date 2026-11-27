@@ -14,14 +14,22 @@ hive upgrade      # update a global install; checkouts print a recipe unless --r
 hive doctor       # environment check + stale-state sweep
 ```
 
-`npm test` runs the suite (`test/*.test.mjs`, node:test) against the built `dist/`, so build first. It runs through `scripts/run-tests.mjs`, which adds four things to a bare `node --test`:
+`npm test` runs the suite (`test/*.test.mjs`, node:test) against the built `dist/`, so build first. It runs through `scripts/run-tests.mjs`, which adds five things to a bare `node --test`:
 
 - For the full suite, it hoists the longest file (typing-guards.test.mjs, measured) to the front by spelling only that one path absolute, since node sorts its file list by path string before scheduling and an absolute spelling always sorts before a relative one - worth ~15.7% wall clock, because that file is otherwise queued behind others under 16-way concurrency (the hoist is `LONGEST_FILE_HOIST` in `scripts/run-tests.mjs` and is pinned by `test/run-tests-file-order.test.mjs`).
 - Any run except a single named `.test.mjs` file first waits on a repo-wide lock file, so two lanes can never run the full suite (or a whole-directory/multi-file target) at once (`scripts/suite-lock.mjs`, `HIVE_TEST_NO_LOCK=1` skips it).
 - After every file has exited, it asks each tmux socket the run created whether a server is still on it, and fails the run on a survivor (`test/CLAUDE.md` has the mechanics).
 - A full run that holds the suite lock also reaps the wedged login shells it created: orphaned `ppid==1` shells are bracketed by PID set before the run and only bracket-new ones are signalled, each re-verified as still an orphan shell at the moment of the signal (`scripts/wedged-shells.mjs`; `HIVE_TEST_NO_REAP=1` opts out; a run without the lock never reaps). Reported as a count line, never a failure.
+- After every file has exited, it checks that no fake-rex relay process a test started is still running, kills any survivor, and fails the run on one (`scripts/rex-relay-leaks.mjs`, fed by the manifest `isolateRex()` appends to).
 
 Tests spawn real MCP server and CLI processes against scratch directories; `test/CLAUDE.md` has the rules that keep them off the live store and off the developer's tmux server. CI runs the same on macOS (`.github/workflows/ci.yml`). For ad-hoc poking, pipe JSON-RPC lines to `node dist/index.js` the same way; MCP handles piped requests concurrently, so drive dependent calls sequentially.
+
+## Fork: terminal seam
+
+This fork adds Rex as a second terminal beside tmux ([docs/tmux.md#rex](docs/tmux.md#rex)). Three rules keep upstream merges cheap:
+- **The facade rule.** Call sites reach panes only through `src/terminal.ts`, which dispatches a `block:` target to `src/terminal/rex.ts` and anything else to the unchanged `src/tmux.ts`. Rex logic lives in new files (`src/terminal/`, `src/rex*.ts`); upstream files get import-path and one-line call-site changes only.
+- **The seam guard.** `test/rex-seam-guard.test.mjs` fails when a file imports a terminal-touching `tmux.js` export outside the facade, runs `tmux` or `rex` outside `src/tmux.ts`, `src/terminal*` and `src/rexCli.ts`, or reads `TMUX*`/`REX_*` outside the facade. A red guard after a merge means upstream added a pane call: route it through the facade, never widen the allowlist.
+- **Merging.** `git fetch upstream && git merge upstream/main`, never a rebase. The merge is done when `npm run build && npm test` passes, the upstream suite and every `test/rex-*.test.mjs` file alike. Never edit an upstream test file and never add a `MIGRATIONS` entry.
 
 ## Architecture
 

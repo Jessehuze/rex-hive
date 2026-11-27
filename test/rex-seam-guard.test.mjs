@@ -57,9 +57,9 @@ function listTs(dir) {
 
 const isFacadeFile = (rel) => rel === "src/terminal.ts" || rel.startsWith("src/terminal/");
 
-const TMUX_SPECIFIER = /"(?:\.\.?\/)+tmux\.js"/g;
-const STATIC_IMPORT = /import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+"(?:\.\.?\/)+tmux\.js"/g;
-const DYNAMIC_IMPORT = /const\s+\{([^}]*)\}\s*=\s*await\s+import\("(?:\.\.?\/)+tmux\.js"\)/g;
+const TMUX_SPECIFIER = /["'`](?:\.\.?\/)+tmux\.js["'`]/g;
+const STATIC_IMPORT = /import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+["'`](?:\.\.?\/)+tmux\.js["'`]/g;
+const DYNAMIC_IMPORT = /const\s+\{([^}]*)\}\s*=\s*await\s+import\(\s*["'`](?:\.\.?\/)+tmux\.js["'`]\s*\)/g;
 
 function importedTmuxNames(text) {
   const names = [];
@@ -85,7 +85,7 @@ function tmuxImportViolations(rel, text) {
   return found;
 }
 
-const EXEC_CALL = /(?<!\bcheck)\(\s*["'`]tmux["'`]|\btmux\(|\(\s*["'`]rex["'`]/;
+const EXEC_CALL = /(?<!\bcheck)\(\s*["'`](?:tmux|rex)["'`]|\btmux\(/;
 
 function execViolations(rel, text) {
   if (EXEC_ALLOWLIST.includes(rel) || EXEC_ALLOWED_PREFIXES.some((p) => rel.startsWith(p))) return [];
@@ -95,8 +95,10 @@ function execViolations(rel, text) {
 const ENV_ALLOWLIST = ["src/terminal.ts", "src/tmux.ts", "src/rexCli.ts"];
 const ENV_NAME = String.raw`(?:TMUX(?:_PANE|_TMPDIR)?\b|REX_\w*)`;
 const ENV_READS = [
-  new RegExp(String.raw`process\.env\.${ENV_NAME}`),
-  new RegExp(String.raw`process\.env\[\s*["'\x60]${ENV_NAME}["'\x60]\s*\]`),
+  new RegExp(String.raw`process\.env\??\.${ENV_NAME}`),
+  new RegExp(String.raw`process\.env(?:\?\.)?\[\s*["'\x60]${ENV_NAME}["'\x60]\s*\]`),
+  new RegExp(String.raw`["'\x60]${ENV_NAME}["'\x60]\s+in\s+process\.env\b`),
+  /\b(?:const|let|var)\s+[\w$]+\s*=\s*process\.env\s*[;\n]/,
   new RegExp(String.raw`\{[^}]*\b${ENV_NAME}[^}]*\}\s*=\s*process\.env\b`),
   /[(,]\s*process\.env\s*[,)]/,
 ];
@@ -152,11 +154,15 @@ describe("rex seam guard", () => {
       "const { HOME, REX_BLOCK: block } = process.env;",
       "tmuxSocketPath(process.env)",
       "probe(1, process.env)",
+      "process.env?.TMUX",
+      "process.env?.['REX_SERVER']",
+      '"TMUX_PANE" in process.env',
+      "const env = process.env;\nif (env.TMUX) {}",
     ]) {
       assert.deepEqual(envViolations("src/x.ts", read), ["src/x.ts"], read);
       assert.deepEqual(envViolations("src/terminal.ts", read), [], read);
     }
-    for (const clean of ["process.env.TMUX_TIMEOUT", "process.env.HIVE_TMUX_TIMEOUT_MS", "const { HOME } = process.env;", "{ env: process.env }"]) {
+    for (const clean of ["process.env.TMUX_TIMEOUT", "process.env.HIVE_TMUX_TIMEOUT_MS", "const { HOME } = process.env;", "{ env: process.env }", '"HOME" in process.env', "const home = process.env.HOME;"]) {
       assert.deepEqual(envViolations("src/x.ts", clean), [], clean);
     }
   });
@@ -174,6 +180,8 @@ describe("rex seam guard", () => {
       'import t, { shellQuote } from "./tmux.js";',
       'const s = (await import("./tmux.js")).shellQuote;',
       'const t = await import("./tmux.js");',
+      "export { shellQuote } from './tmux.js';",
+      "const t = await import(`./tmux.js`);",
     ]) {
       assert.equal(tmuxImportViolations("src/x.ts", form).length, 1, form);
     }
@@ -185,6 +193,9 @@ describe("rex seam guard", () => {
       }
     }
     assert.equal(execViolations("src/x.ts", "check('tmux', () => version())").length, 0);
+    assert.equal(execViolations("src/x.ts", 'r.check("rex", () => path)').length, 0);
+    assert.equal(tmuxImportViolations("src/x.ts", "import { sendText } from './tmux.js';").length, 1);
+    assert.equal(tmuxImportViolations("src/x.ts", "import { shellQuote } from '../tmux.js';").length, 0);
     assert.equal(execViolations("src/rexCli.ts", rexCall("(\n  ", '"')).length, 0);
     assert.equal(execViolations("src/x.ts", 'spawnSync("tmux", [])').length, 1);
     assert.equal(execViolations("src/x.ts", 'tmux("kill-pane")').length, 1);
