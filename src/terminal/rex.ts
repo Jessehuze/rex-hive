@@ -357,7 +357,7 @@ export function rexProbe(target: string, server?: string): RexProbe {
   try {
     const resolved = requireServer(target, server);
     const reply = blockMethod<ProcessReply>(resolved, rexSessionOf(resolved, target), target, "process");
-    const proc = readProcess(reply);
+    const proc = anchored(readProcess(reply), guarded(() => resumeAnchors([target]).get(target), undefined));
     return { live: true, pid: proc.pid || null, argv: proc.argv || null, exited: proc.exited };
   } catch (err) {
     return { live: blockGone(err) ? false : null, pid: null, argv: null, exited: false };
@@ -478,7 +478,7 @@ export function rexSnapshot(server?: string | null, extraBlocks: string[] = []):
       probed: entry.probed === true && entry.process !== undefined,
     });
   }
-  if (store !== null) bestEffort(() => applyResumeAnchors(blocks));
+  bestEffort(() => applyResumeAnchors(blocks));
   const incomplete = reply.incomplete === true || missingBlocksStillOpen(resolved, wanted.filter((id) => !blocks.has(id)));
   return { answered: true, server: resolved, incomplete, unreachableSince: null, blocks };
 }
@@ -494,18 +494,42 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-// A restored block's process is the user's shell; while the resumed harness under it lives, report the harness.
-function applyResumeAnchors(blocks: Map<string, RexBlock>): void {
-  const ids = [...blocks.keys()];
-  if (ids.length === 0) return;
+interface ResumeAnchor {
+  shell: string;
+  pid: string;
+  program: string;
+}
+
+// Dead anchors are deleted when first seen, so a pid reused later under the same shell never reads live.
+function resumeAnchors(ids: string[]): Map<string, ResumeAnchor> {
+  const found = new Map<string, ResumeAnchor>();
+  if (store === null || ids.length === 0) return found;
   const rows = sql()
-    .prepare(`SELECT key, value FROM kv WHERE key IN (${ids.map(() => "?").join(", ")})`)
-    .all(...ids.map(rexResumedUnderKey)) as { key: string; value: string }[];
-  for (const { key, value } of rows) {
-    const block = blocks.get(key.slice(rexResumedUnderKey("").length));
-    const anchor = guarded(() => JSON.parse(value) as { shell?: unknown; pid?: unknown }, {});
-    if (!block || block.exited || typeof anchor.pid !== "string" || block.pid !== anchor.shell || !/^[1-9]\d*$/.test(anchor.pid)) continue;
-    if (pidAlive(Number(anchor.pid))) Object.assign(block, { pid: anchor.pid, argv: "", programs: [] });
+    .prepare(`SELECT project_id, key, value FROM kv WHERE key IN (${ids.map(() => "?").join(", ")})`)
+    .all(...ids.map(rexResumedUnderKey)) as { project_id: number; key: string; value: string }[];
+  for (const { project_id, key, value } of rows) {
+    const anchor = guarded(() => JSON.parse(value) as Partial<ResumeAnchor>, {});
+    const pid = typeof anchor.pid === "string" && /^[1-9]\d*$/.test(anchor.pid) ? anchor.pid : null;
+    if (pid === null || !pidAlive(Number(pid))) {
+      bestEffort(() => void sql().prepare("DELETE FROM kv WHERE project_id = ? AND key = ? AND value = ?").run(project_id, key, value));
+      continue;
+    }
+    if (typeof anchor.shell === "string") found.set(key.slice(rexResumedUnderKey("").length), { shell: anchor.shell, pid, program: anchor.program ?? "" });
+  }
+  return found;
+}
+
+// A restored block's process is the user's shell; while the resumed harness under it lives, report the harness.
+function anchored<T extends { pid: string; argv: string; programs?: string[]; exited: boolean }>(proc: T, anchor: ResumeAnchor | undefined): T {
+  if (!anchor || proc.exited || proc.pid !== anchor.shell) return proc;
+  return { ...proc, pid: anchor.pid, argv: anchor.program, ...(proc.programs ? { programs: anchor.program ? [anchor.program] : [] } : {}) };
+}
+
+function applyResumeAnchors(blocks: Map<string, RexBlock>): void {
+  const anchors = resumeAnchors([...blocks.keys()]);
+  for (const [id, anchor] of anchors) {
+    const block = blocks.get(id);
+    if (block) blocks.set(id, anchored(block, anchor));
   }
 }
 

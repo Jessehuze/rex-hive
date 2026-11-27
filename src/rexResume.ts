@@ -15,7 +15,7 @@ import { FIRST_MESSAGE_SHA_ENV } from "./firstMessage.js";
 import { loadProjectYml } from "./projectYml.js";
 import { shellQuote } from "./tmux.js";
 import { ACTIVE_TIMER_WHERE, socketAwaitingWhere } from "./wakeSql.js";
-import { commandArgv, hiveInvocation, REX_SHELL, REX_SOCKET_PREFIX, rexBlockCommand, rexLaunchArgv, rexResumedUnderKey } from "./terminal/rex.js";
+import { commandArgv, hiveInvocation, programWords, REX_SHELL, REX_SOCKET_PREFIX, rexBlockCommand, rexLaunchArgv, rexResumedUnderKey } from "./terminal/rex.js";
 
 export const REX_RESUME_VERB = "__rex-resume";
 export const REX_RESUME_PID_ENV = "HIVE_REX_RESUME_PID";
@@ -144,20 +144,21 @@ function leadLaunch(row: AgentRow, projectPath: string): ResumeLaunch {
   };
 }
 
-function recordResumeAnchor(row: AgentRow, pid: string, shell: string | null): void {
+function recordResumeAnchor(row: AgentRow, pid: string, shell: string | null, program: string): void {
   const key = rexResumedUnderKey(row.tmux_target);
   if (!shell) return void db.prepare("DELETE FROM kv WHERE project_id = ? AND key = ?").run(row.project_id, key);
   db.prepare(
     `INSERT INTO kv (project_id, key, value, updated_by) VALUES (?, ?, ?, 'hive')
      ON CONFLICT (project_id, key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
-  ).run(row.project_id, key, JSON.stringify({ shell, pid }));
+  ).run(row.project_id, key, JSON.stringify({ shell, pid, program }));
 }
 
 function recordResumedPid(row: AgentRow, pid: string, command: string, pending: boolean): boolean {
   const shell = psField(pid, "ppid");
+  const program = basename(programWords(commandArgv(command))[0] ?? "");
   return db.transaction(() => {
     const changed = recordRowPid(row, pid, command, pending);
-    if (changed) recordResumeAnchor(row, pid, shell && /^[1-9]\d*$/.test(shell) ? shell : null);
+    if (changed) recordResumeAnchor(row, pid, shell && /^[1-9]\d*$/.test(shell) ? shell : null, program);
     return changed;
   }).immediate();
 }

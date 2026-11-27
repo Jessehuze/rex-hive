@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 
-import { CLI, clearHiveEnv, isolateTmux, leadRow, McpClient, runCli, scratchDirs } from "./helpers.mjs";
+import { CLI, clearHiveEnv, DIST, isolateTmux, leadRow, McpClient, runCli, runNode, scratchDirs } from "./helpers.mjs";
 import { fakeRexDo, isolateRex, waitFor } from "./rex-helpers.mjs";
 
 const { cleanup: cleanupTmux } = isolateTmux("rex resume tests");
@@ -313,6 +313,55 @@ describe("Rex restart survival", () => {
     assert.equal(rowById(worker.id).status, "running", "three janitor ticks leave the resumed worker running");
     assert.equal(terminal.rowOwnership(rowById(worker.id)), "live");
     assert.equal(terminal.rowOwnership(rowById(lead.id)), "live");
+  });
+
+  async function restartResumed(name) {
+    const started = await startProject(name);
+    const { lead, worker } = started;
+    giveSessions(started);
+    fakeRexDo(dirs.tmp, "restartServer", { trust: true, env: { PATH: CLAUDE_PATH } });
+    await waitFor(() => rowById(worker.id).pane_pid !== worker.pane_pid && rowById(lead.id).pane_pid !== lead.pane_pid, { timeoutMs: 15000 });
+    await waitFor(() => dumpsOf(worker.name).some((d) => d.pid === rowById(worker.id).pane_pid), { timeoutMs: 15000 });
+    return started;
+  }
+
+  it("after a trusted restart, a resumed lead's SessionStart records its harness pid and a worker's current command is its harness", async () => {
+    const { lead, worker } = await restartResumed("rex-probe");
+    const leadNow = rowById(lead.id);
+    const shellPid = String(fake.state().blocks[lead.tmux_target].child_pid);
+    assert.notEqual(leadNow.pane_pid, shellPid, "the resumed lead runs under the block's shell");
+    const hook = await runNode(join(DIST, "hook.js"), ["session_start"], {
+      dataDir: dirs.dataDir,
+      env: { ...rexEnv, HIVE_AGENT_ID: lead.actor_id, HIVE_LEAD: "1", REX_BLOCK: lead.tmux_target, CLAUDE_CODE_MESSAGING_SOCKET: "/tmp/rex-resumed-lead.sock" },
+      stdin: JSON.stringify({ hook_event_name: "SessionStart", session_id: `sess-${lead.id}`, source: "resume" }),
+    });
+    assert.equal(hook.code, 0, hook.stderr);
+    const registered = rowById(lead.id);
+    assert.equal(registered.claude_messaging_socket, "/tmp/rex-resumed-lead.sock");
+    assert.equal(registered.claude_messaging_pane_pid, registered.pane_pid, "quiet messaging needs the registered pid to be the row's pane pid");
+    assert.equal(terminal.panePid(worker.tmux_target), rowById(worker.id).pane_pid);
+    assert.equal(terminal.paneCurrentCommand(worker.tmux_target), "claude", "agent_status's current_command names the harness, not the shell");
+  });
+
+  it("a resumed-under anchor whose pid is seen dead is deleted, so a later reuse of that pid cannot read live", async () => {
+    const { worker } = await restartResumed("rex-reuse-anchor");
+    const key = `terminal:rex:resumed-under:${worker.tmux_target}`;
+    const anchorRow = () => db.prepare("SELECT value FROM kv WHERE key = ?").get(key);
+    assert.ok(anchorRow(), "the resume recorded an anchor");
+    const resumedPid = rowById(worker.id).pane_pid;
+    await killAndWait(resumedPid);
+    assert.equal(terminal.rowOwnership(rowById(worker.id)), "reissued");
+    assert.equal(anchorRow(), undefined, "the first dead sighting deletes the anchor");
+    const stranger = spawn("sleep", ["600"], { stdio: "ignore" });
+    try {
+      db.prepare("UPDATE kv SET value = json_set(value, '$.pid', ?) WHERE key = ?").run(String(stranger.pid), key);
+      assert.equal(anchorRow(), undefined, "nothing is left to repoint at a reused pid");
+      db.prepare("UPDATE agents SET pane_pid = ? WHERE id = ?").run(String(stranger.pid), worker.id);
+      assert.equal(terminal.rowOwnership(rowById(worker.id)), "reissued", "a live pid the row names is not owned without an anchor");
+    } finally {
+      stranger.kill("SIGKILL");
+      db.prepare("UPDATE agents SET status = 'closed' WHERE id = ?").run(worker.id);
+    }
   });
 
   it("when a resumed harness exits under Rex's wrapper, its row is a lost worker and the block's shell stays open", async () => {
