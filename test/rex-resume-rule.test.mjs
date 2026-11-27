@@ -4,7 +4,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 
-import { CLI, clearHiveEnv, isolateTmux, runCli, scratchDirs } from "./helpers.mjs";
+import { CLI, clearHiveEnv, isolateTmux, REPO, runCli, scratchDirs } from "./helpers.mjs";
 import { fakeRexDo, isolateRex } from "./rex-helpers.mjs";
 
 const { cleanup: cleanupTmux } = isolateTmux("rex resume rule tests");
@@ -149,7 +149,7 @@ describe("hive setup --rex-resume --install and --uninstall", () => {
     }
   });
 
-  it("--uninstall removes the marked block, keeps the user's lines, and reloads; a second run reports nothing to remove", async () => {
+  it("--uninstall removes the marked block, keeps the user's lines, and reloads; a second run reports nothing to remove and reloads again", async () => {
     const config = scratchConfig("uninstall", "-- top\n");
     assert.equal((await hive(["setup", "--rex-resume", "--install"], config)).code, 0);
     writeFileSync(config, `${readFileSync(config, "utf8")}-- bottom\n`);
@@ -162,7 +162,7 @@ describe("hive setup --rex-resume --install and --uninstall", () => {
     const again = await hive(["setup", "--rex-resume", "--uninstall"], config);
     assert.equal(again.code, 0, again.stdout + again.stderr);
     assert.match(again.stdout, /nothing to remove/);
-    assert.equal(reloads().length, before + 1);
+    assert.equal(reloads().length, before + 2);
   });
 
   it("--install and --uninstall refuse an orphan open marker above the user's lines, naming its line, and leave the file byte-identical", async () => {
@@ -272,6 +272,60 @@ describe("hive setup --rex-resume --install and --uninstall", () => {
       chmodSync(dirname(config), 0o755);
     }
     assert.equal(readFileSync(config, "utf8"), "-- mine\n");
+  });
+
+  it("isolateRex registers its state file in the relay manifest even when clearHiveEnv ran first", () => {
+    const own = mkdtempSync(join(dirs.tmp, "manifest-"));
+    const manifest = join(own, "manifest.txt");
+    writeFileSync(manifest, "");
+    const child = `const { clearHiveEnv } = await import(${JSON.stringify(join(REPO, "test", "helpers.mjs"))});
+const { isolateRex } = await import(${JSON.stringify(join(REPO, "test", "rex-helpers.mjs"))});
+clearHiveEnv();
+isolateRex(${JSON.stringify(own)});`;
+    const run = spawnSync(process.execPath, ["--input-type=module", "-e", child], { encoding: "utf8", env: { PATH: process.env.PATH, HOME, HIVE_REX_RELAY_MANIFEST: manifest } });
+    assert.equal(run.status, 0, run.stderr);
+    assert.deepEqual(readFileSync(manifest, "utf8").split("\n").filter(Boolean), [join(own, "fake-rex.json")]);
+  });
+
+  it("a failed reload after --uninstall names rex config reload, not --install, and a re-run with nothing to remove still reloads", async () => {
+    const config = scratchConfig("uninstall-reload", "-- mine\n");
+    assert.equal((await hive(["setup", "--rex-resume", "--install"], config)).code, 0);
+    fakeRexDo(dirs.tmp, "stopServer");
+    let failed;
+    try {
+      failed = await hive(["setup", "--rex-resume", "--uninstall"], config);
+    } finally {
+      fakeRexDo(dirs.tmp, "restartServer");
+    }
+    assert.equal(failed.code, 1, failed.stdout + failed.stderr);
+    assert.match(failed.stderr, /rex config reload failed.*run: rex config reload/s);
+    assert.doesNotMatch(failed.stderr, /--install/);
+    assert.equal(readFileSync(config, "utf8"), "-- mine\n");
+    const before = reloads().length;
+    const again = await hive(["setup", "--rex-resume", "--uninstall"], config);
+    assert.equal(again.code, 0, again.stdout + again.stderr);
+    assert.match(again.stdout, /nothing to remove; reloaded/);
+    assert.equal(reloads().length, before + 1);
+  });
+
+  it("a file with mixed line endings keeps the user's lines byte for byte, and the block takes the dominant ending", async () => {
+    const original = "-- a\r\n-- b\n-- c\r\n-- d\r\n";
+    const config = scratchConfig("mixed", original);
+    assert.equal((await hive(["setup", "--rex-resume", "--install"], config)).code, 0);
+    const installed = readFileSync(config, "utf8");
+    assert.ok(installed.startsWith(original), JSON.stringify(installed));
+    const block = installed.slice(original.length);
+    assert.equal(blocksIn(block), 1);
+    assert.doesNotMatch(block, /[^\r]\n/, JSON.stringify(block));
+    assert.equal((await hive(["setup", "--rex-resume", "--uninstall"], config)).code, 0);
+    assert.equal(readFileSync(config, "utf8"), original);
+
+    const tie = "-- a\r\n-- b\n";
+    const tied = scratchConfig("tie", tie);
+    assert.equal((await hive(["setup", "--rex-resume", "--install"], tied)).code, 0);
+    const tieText = readFileSync(tied, "utf8");
+    assert.ok(tieText.startsWith(tie), JSON.stringify(tieText));
+    assert.doesNotMatch(tieText.slice(tie.length), /\r/, "a tie writes the block with LF");
   });
 
   it("isolateRex pins HIVE_BIN_DIR to a scratch dir for this process, fake.env and the child env", () => {

@@ -7,6 +7,8 @@ import { REPO } from "./helpers.mjs";
 export const FAKE_REX_DIR = join(REPO, "test", "fixtures", "fake-rex");
 const FAKE_REX_MAIN = join(FAKE_REX_DIR, "fake-rex.mjs");
 
+const RELAY_MANIFEST = process.env.HIVE_REX_RELAY_MANIFEST;
+
 const statePath = (tmp) => join(tmp, "fake-rex.json");
 const callsPath = (tmp) => join(tmp, "fake-rex-calls.jsonl");
 
@@ -32,9 +34,9 @@ export function isolateRex(tmp, { ownerPid = process.pid } = {}) {
     JSON.stringify({ address: process.env.REX_SERVER, server: "running", revision: 0, sessions: [], windows: [], blocks: {}, closed: [], relays: [], performed: [] }),
   );
   writeFileSync(callsPath(tmp), "");
-  if (process.env.HIVE_REX_RELAY_MANIFEST) {
+  if (RELAY_MANIFEST) {
     try {
-      appendFileSync(process.env.HIVE_REX_RELAY_MANIFEST, `${statePath(tmp)}\n`);
+      appendFileSync(RELAY_MANIFEST, `${statePath(tmp)}\n`);
     } catch {}
   }
   process.on("exit", () => killAll(tmp));

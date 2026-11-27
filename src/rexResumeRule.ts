@@ -118,6 +118,7 @@ function isSymlink(path: string): boolean {
 
 interface Layout {
   eol: string;
+  raw: string[];
   lines: string[];
   block: { open: number; close: number } | null;
 }
@@ -128,16 +129,18 @@ function markers(kind: string, at: number[]): string {
 }
 
 function layout(config: AccountConfig): Layout {
-  const eol = config.text.includes("\r\n") ? "\r\n" : "\n";
-  const lines = config.text.split(/\r?\n/);
+  const raw = config.text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+  const crlf = raw.filter((piece) => piece.endsWith("\r\n")).length;
+  const eol = crlf > raw.filter((piece) => piece.endsWith("\n")).length - crlf ? "\r\n" : "\n";
+  const lines = raw.map((piece) => piece.replace(/\r?\n$/, ""));
   const opens: number[] = [];
   const closes: number[] = [];
   lines.forEach((line, i) => {
     if (line.trimEnd() === REX_RULE_OPEN) opens.push(i);
     else if (line.trimEnd() === REX_RULE_CLOSE) closes.push(i);
   });
-  if (opens.length === 0 && closes.length === 0) return { eol, lines, block: null };
-  if (opens.length === 1 && closes.length === 1 && opens[0]! < closes[0]!) return { eol, lines, block: { open: opens[0]!, close: closes[0]! } };
+  if (opens.length === 0 && closes.length === 0) return { eol, raw, lines, block: null };
+  if (opens.length === 1 && closes.length === 1 && opens[0]! < closes[0]!) return { eol, raw, lines, block: { open: opens[0]!, close: closes[0]! } };
   throw new RexRuleRefusal(
     `${config.path}: hive's marker lines do not pair up (${markers("open", opens)}, ${markers("close", closes)}), so hive cannot tell which lines it manages; ` +
       `fix them by hand so one "${REX_RULE_OPEN}" line sits above one "${REX_RULE_CLOSE}" line, or neither remains, then re-run`,
@@ -149,20 +152,21 @@ function outsideBlock({ lines, block }: Layout): string[] {
 }
 
 function withBlock(at: Layout, blockLines: string[]): string {
-  const lines = [...at.lines];
-  if (at.block) lines.splice(at.block.open, at.block.close - at.block.open + 1, ...blockLines);
+  const raw = [...at.raw];
+  const block = blockLines.map((line) => `${line}${at.eol}`);
+  if (at.block) raw.splice(at.block.open, at.block.close - at.block.open + 1, ...block);
   else {
-    if (lines[lines.length - 1] === "") lines.pop();
-    lines.push(...(lines.length > 0 ? [""] : []), ...blockLines, "");
+    if (raw.length > 0 && !raw[raw.length - 1]!.endsWith("\n")) raw[raw.length - 1] += at.eol;
+    raw.push(...(raw.length > 0 ? [at.eol] : []), ...block);
   }
-  return lines.join(at.eol);
+  return raw.join("");
 }
 
 function withoutBlock(at: Layout & { block: { open: number; close: number } }): string {
-  const lines = [...at.lines];
-  const gap = at.block.open > 0 && lines[at.block.open - 1] === "" ? 1 : 0;
-  lines.splice(at.block.open - gap, at.block.close - at.block.open + 1 + gap);
-  return lines.join(at.eol);
+  const raw = [...at.raw];
+  const gap = at.block.open > 0 && at.lines[at.block.open - 1] === "" ? 1 : 0;
+  raw.splice(at.block.open - gap, at.block.close - at.block.open + 1 + gap);
+  return raw.join("");
 }
 
 function writeDurably(file: string, data: string | Buffer, mode: number): void {
@@ -223,12 +227,12 @@ function validateAndWrite(config: AccountConfig, candidate: string, install: boo
   return config.original ? [`The previous file is kept at ${backup}.`] : [];
 }
 
-function reload(done: string[]): string[] {
+function reload(done: string[], retry: string): string[] {
   try {
     rexConfigReload();
   } catch (err) {
     throw new RexRuleRefusal(
-      `init.lua is written, but rex config reload failed: ${err instanceof Error ? err.message : String(err)}. Rex reads it when it next starts; to load it now, start the server and re-run: ${REX_RULE_INSTALL}`,
+      `init.lua is written, but rex config reload failed: ${err instanceof Error ? err.message : String(err)}. Rex reads it when it next starts; to load it now, start the server and run: ${retry}`,
       done,
     );
   }
@@ -243,12 +247,12 @@ export function installRexResumeRule(): string[] {
   }
   const text = withBlock(at, [REX_RULE_OPEN, ...rexResumeTrustRule().split("\n"), REX_RULE_CLOSE]);
   if (text === config.text) {
-    reload([]);
+    reload([], REX_RULE_INSTALL);
     return [`hive's resume rule in ${config.path} is already current; reloaded.`, `Remove it with: ${REX_RULE_UNINSTALL}`];
   }
   const written = validateAndWrite(config, text, true);
   return [
-    ...reload([`Installed hive's resume rule in ${config.path}, between the lines`, `  ${REX_RULE_OPEN}`, `  ${REX_RULE_CLOSE}`, ...written]),
+    ...reload([`Installed hive's resume rule in ${config.path}, between the lines`, `  ${REX_RULE_OPEN}`, `  ${REX_RULE_CLOSE}`, ...written], REX_RULE_INSTALL),
     "A hive block launched with a resume record naming another command resumes only once it is relaunched.",
     `Remove it with: ${REX_RULE_UNINSTALL}`,
   ];
@@ -260,7 +264,10 @@ export function uninstallRexResumeRule(): string[] {
   const unmarked = outsideBlock(at).some((line) => UNMARKED_RULE.test(line))
     ? [`${config.path} still sets resume.trust.${REX_RESUME_RULE_NAME} in lines hive does not manage; remove those by hand.`]
     : [];
-  if (!at.block) return [`No hive-managed resume rule in ${config.path}; nothing to remove.`, ...unmarked];
+  if (!at.block) {
+    reload([], "rex config reload");
+    return [`No hive-managed resume rule in ${config.path}; nothing to remove; reloaded.`, ...unmarked];
+  }
   const written = validateAndWrite(config, withoutBlock({ ...at, block: at.block }), false);
-  return [...reload([`Removed hive's resume rule from ${config.path}.`, ...written]), ...unmarked];
+  return [...reload([`Removed hive's resume rule from ${config.path}.`, ...written], "rex config reload"), ...unmarked];
 }
