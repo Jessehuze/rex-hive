@@ -10,10 +10,10 @@ import { fakeRexDo, isolateRex, waitFor } from "./rex-helpers.mjs";
 
 const { cleanup: cleanupTmux } = isolateTmux("rex resume tests");
 const dirs = scratchDirs();
-const fake = isolateRex(dirs.tmp);
 clearHiveEnv();
+const fake = isolateRex(dirs.tmp);
 process.env.HIVE_DATA_DIR = dirs.dataDir;
-const rexEnv = Object.fromEntries(Object.entries(fake.env).filter(([k]) => !k.startsWith("HIVE_")));
+const rexEnv = fake.childEnv;
 
 const { db, migrate } = await import("../dist/db.js");
 migrate();
@@ -44,8 +44,7 @@ writeFileSync(
 );
 chmodSync(CLAUDE, 0o755);
 const CLAUDE_PATH = `${BIN}:${rexEnv.PATH}`;
-const NO_DISPATCHER = join(dirs.tmp, "no-dispatcher-bin");
-const withClaude = (env = {}) => ({ ...rexEnv, PATH: CLAUDE_PATH, HIVE_BIN_DIR: NO_DISPATCHER, ...env });
+const withClaude = (env = {}) => ({ ...rexEnv, PATH: CLAUDE_PATH, ...env });
 
 const dumpsOf = (name) =>
   readdirSync(DUMPS)

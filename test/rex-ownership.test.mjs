@@ -8,8 +8,8 @@ import { fakeRexDo, isolateRex, waitFor } from "./rex-helpers.mjs";
 
 const { cleanup: cleanupTmux } = isolateTmux("rex ownership tests");
 const dirs = scratchDirs();
-const fake = isolateRex(dirs.tmp);
 clearHiveEnv();
+const fake = isolateRex(dirs.tmp);
 process.env.HIVE_DATA_DIR = dirs.dataDir;
 process.env.HIVE_TERMINAL = "rex";
 const REX_ADDR = process.env.REX_SERVER;

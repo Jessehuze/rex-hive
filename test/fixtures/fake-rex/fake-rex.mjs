@@ -1021,7 +1021,7 @@ function fakeOp(op, raw) {
         state.perform_error = args.perform_error ?? null;
         return {};
       case "setServerInfo":
-        for (const key of ["api_revision", "rex_version", "config_ignores_trust"]) if (args[key] !== undefined) state[key] = args[key];
+        for (const key of ["api_revision", "rex_version", "config_ignores_trust", "config_check_side_edit"]) if (args[key] !== undefined) state[key] = args[key];
         return {};
       case "setPorts": {
         const block = state.blocks[args.block_id];
@@ -1137,7 +1137,9 @@ function loadConfig(path, state) {
 function configCheck(tail) {
   const f = flags(tail, { "--json": "json?" });
   const path = insideScratch(f._[0] ?? accountConfigPath());
-  const report = loadConfig(path, readState());
+  const state = readState();
+  const report = loadConfig(path, state);
+  if (f._[0] && state.config_check_side_edit) appendFileSync(insideScratch(state.config_check_side_edit), "-- edited meanwhile\n");
   if (f.json) emit(report);
   else process.stdout.write(`config: ${path}\nresume rules: ${report.resume_rules.length}\n${report.resume_rules.map((r) => `  ${r.name} (${r.source})\n`).join("")}`);
   return report.diagnostics.some((d) => d.severity === "error") ? 1 : 0;

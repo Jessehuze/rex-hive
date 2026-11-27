@@ -2134,8 +2134,8 @@ function cmdRexResumeRule(install: boolean, uninstall: boolean): void {
   try {
     for (const line of install ? installRexResumeRule() : uninstallRexResumeRule()) console.log(line);
   } catch (e) {
-    if (!(e instanceof RexRuleRefusal)) throw e;
-    console.error(`hive setup --rex-resume: ${e.message}`);
+    if (e instanceof RexRuleRefusal) for (const line of e.printed) console.log(line);
+    console.error(`hive setup --rex-resume: ${errorMessage(e)}`);
     process.exit(1);
   }
 }

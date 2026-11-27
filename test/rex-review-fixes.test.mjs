@@ -165,7 +165,7 @@ describe("the terminal:rex:in-use flag", () => {
 });
 
 describe("output for a user who never chose Rex", () => {
-  const plainEnv = () => Object.fromEntries(Object.entries(fake.env).filter(([k]) => !k.startsWith("HIVE_")));
+  const plainEnv = () => ({ ...fake.childEnv });
   const own = () => {
     const d = scratchDirs();
     return { d, opts: (env = {}) => ({ cwd: d.projectDir, dataDir: d.dataDir, tmp: d.tmp, env: { ...plainEnv(), HIVE_NO_UPDATE_CHECK: "1", ...env } }) };

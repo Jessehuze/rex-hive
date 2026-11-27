@@ -84,7 +84,7 @@ async function doctor(p, env = {}) {
   return result.stdout;
 }
 
-const doctorEnv = { HIVE_NO_UPDATE_CHECK: "1", CLAUDE_CONFIG_DIR: claudeDir, HIVE_BIN_DIR: join(dirs.tmp, "no-dispatcher-bin") };
+const doctorEnv = { HIVE_NO_UPDATE_CHECK: "1", CLAUDE_CONFIG_DIR: claudeDir };
 
 const line = (out, label) => out.split("\n").find((l) => new RegExp(`^ {2}(?:ok {4}|warn {2}|FAIL {2}|info {2})${label}: `).test(l)) ?? null;
 
@@ -278,7 +278,7 @@ describe("a lead resolved to Rex refuses when Rex cannot serve it", () => {
 });
 
 describe("doctor's Rex config readers", () => {
-  it("compares a rule's command word for word, accepts any rex.match placeholder in the id slot, and names the first word that differs", async () => {
+  it("compares a rule's command word for word, accepts only rex.match.id in the id slot, and names the first word that differs", async () => {
     const { ruleDifference } = await import("../dist/rexResumeRule.js");
     const expected = ["/bin/sh", "-c", "script", "hive", "/pinned/hive", "__rex-resume", { match: "id" }];
     assert.equal(ruleDifference(["/bin/sh", "-c", "script", "hive", "/pinned/hive", "__rex-resume", { match: "id" }], expected), null);
@@ -287,6 +287,7 @@ describe("doctor's Rex config readers", () => {
     assert.equal(ruleDifference(["/bin/sh", "-c", "script", "hive", "/pinned/hive"], expected), "lacks __rex-resume");
     assert.equal(ruleDifference([...expected, "--data-dir"], expected), "names --data-dir");
     assert.equal(ruleDifference("not a list", expected), "a command that is not a list");
+    assert.equal(ruleDifference(["/bin/sh", "-c", "script", "hive", "/pinned/hive", "__rex-resume", { match: "uuid" }], expected), 'names {"match":"uuid"}');
   });
 
   it("reads --feature-session-naming false with a space, =false and a quoted false as off, and every other spelling as on", async () => {

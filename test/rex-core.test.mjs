@@ -8,8 +8,8 @@ import { fakeRexDo, isolateRex } from "./rex-helpers.mjs";
 
 const { cleanup: cleanupTmux } = isolateTmux("rex core pane operation tests");
 const dirs = scratchDirs();
-const fake = isolateRex(dirs.tmp);
 clearHiveEnv();
+const fake = isolateRex(dirs.tmp);
 process.env.HIVE_DATA_DIR = dirs.dataDir;
 const REX_ADDR = process.env.REX_SERVER;
 
