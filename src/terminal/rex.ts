@@ -147,8 +147,8 @@ interface ResolveReply {
   results?: { status?: string; target?: { session_id?: string } | null }[] | null;
 }
 
-export function rexSessionOf(server: string, block: string): string {
-  const reply = rexApi<ResolveReply>(server, "target.resolve", { kinds: ["session"], queries: [block] });
+export function rexSessionOf(server: string, block: string, timeout?: string): string {
+  const reply = rexApi<ResolveReply>(server, "target.resolve", { kinds: ["session"], queries: [block] }, timeout);
   if (!Array.isArray(reply.results)) throw new RexError("rex target.resolve printed no results", "bad_output", "");
   const hit = reply.results[0];
   if (hit?.status !== "resolved" || !hit.target?.session_id) {
@@ -1475,19 +1475,19 @@ export function rexLayoutPlan(lead: string, blocks: string[], layout: WindowLayo
   return plan;
 }
 
-export function rexApplyLayout(window: { lead: string; blocks: string[]; server?: string }, layout: WindowLayout): RexLayoutPlan {
+export function rexApplyLayout(window: { lead: string; blocks: string[]; server?: string; session?: string }, layout: WindowLayout, callTimeout?: string): RexLayoutPlan {
   const resolved = requireServer(window.lead, window.server);
-  const session = rexSessionOf(resolved, window.lead);
+  const session = window.session ?? rexSessionOf(resolved, window.lead, callTimeout);
   const plan = rexLayoutPlan(window.lead, window.blocks, layout);
   for (const move of plan.moves) {
     rexApi(resolved, "session.move_block", {
       session_id: session, block_id: move.block, anchor_block_id: move.anchor, direction: move.direction, side: "after",
-    });
+    }, callTimeout);
   }
   for (const resize of plan.resizes) {
     rexApi(resolved, "session.resize_pane", {
       session_id: session, direction: resize.direction, before_block_id: resize.before, after_block_id: resize.after, ratio: resize.ratio,
-    });
+    }, callTimeout);
   }
   return plan;
 }
@@ -1675,4 +1675,45 @@ export function rexPeekBlock(projectId: number, name: string, target: string): s
   if (!spot.floating) return `${name}: not hidden, so there is nothing to peek at`;
   rexApi(spot.server, "session.set_layer_state", { session_id: spot.session, layer_id: spot.layer, state: "normal", focus: true });
   return `${name}: peeking over the lead; hive hide ${name} minimizes it again`;
+}
+
+export function rexTiledInTab(anchor: { tmux_target: string; tmux_socket: string }, target: string): boolean {
+  const server = rowServer(anchor.tmux_socket, anchor.tmux_target);
+  if (!server) return false;
+  const session = rexSessionOf(server, anchor.tmux_target, REX_RETILE_CALL_TIMEOUT);
+  const view = rexApi<SessionView>(server, "session.view", { session_id: session }, REX_RETILE_CALL_TIMEOUT);
+  const home = placeOf(view, anchor.tmux_target);
+  const mine = placeOf(view, target);
+  return !!home && !!mine && !mine.floating && mine.window === home.window;
+}
+
+export const REX_RETILE_CALL_TIMEOUT = "2s";
+
+export type RexLeadRow = { tmux_target: string; tmux_socket: string; pane_pid: string; command: string };
+
+export function rexRetileTab(lead: RexLeadRow, layout: WindowLayout, extra: string[] = []): RexLayoutPlan | null {
+  if (store?.inTransaction) return null;
+  const server = rowServer(lead.tmux_socket, lead.tmux_target);
+  if (!server) return null;
+  const rows = sql()
+    .prepare(
+      `SELECT name, kind, tmux_target, tmux_socket, pane_pid, command FROM agents
+        WHERE kind != 'lead' AND status = 'running' AND tmux_target LIKE 'block:%' AND tmux_socket = ? AND tmux_target != ? ORDER BY id`,
+    )
+    .all(lead.tmux_socket, lead.tmux_target) as ProjectBlockRow[];
+  const session = rexSessionOf(server, lead.tmux_target, REX_RETILE_CALL_TIMEOUT);
+  const view = rexApi<SessionView>(server, "session.view", { session_id: session }, REX_RETILE_CALL_TIMEOUT);
+  const snap = rexSnapshot(server, [lead.tmux_target, ...rows.map((r) => r.tmux_target), ...extra]);
+  if (snap === null || !snap.answered || rexOwnership(lead, snap) !== "live") return null;
+  const home = placeOf(view, lead.tmux_target);
+  if (!home || home.floating) return null;
+  const inTab = (block: string): boolean => {
+    const where = placeOf(view, block);
+    return !!where && !where.floating && where.window === home.window;
+  };
+  if (!extra.every(inTab)) return null;
+  const owned = rows.filter((r) => rexOwnership(r, snap) === "live").map((r) => r.tmux_target);
+  const blocks = [...new Set([...owned, ...extra])].filter(inTab);
+  if (blocks.length === 0) return null;
+  return rexApplyLayout({ lead: lead.tmux_target, blocks, server, session }, layout, REX_RETILE_CALL_TIMEOUT);
 }

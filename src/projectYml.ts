@@ -35,6 +35,7 @@ export interface ProjectYml {
   layout: WindowLayout | null;
   terminal: Terminal | null;
   workers: "shown" | "hidden" | null;
+  retile: boolean | null;
 
   profile: string | null;
 
@@ -66,6 +67,7 @@ export const BUILT_IN_PROJECT_YML: Readonly<ProjectYml> = Object.freeze({
   layout: null,
   terminal: null,
   workers: null,
+  retile: null,
   profile: null,
   agents: null,
   lead_branches: null,
@@ -158,7 +160,7 @@ export interface ResolvedHiveConfig {
   autoAttach: { value: AutoAttach; source: ConfigSource };
 }
 
-type NullableField = "lead" | "placement" | "layout" | "terminal" | "workers" | "profile" | "context_checkpoint_percent";
+type NullableField = "lead" | "placement" | "layout" | "terminal" | "workers" | "retile" | "profile" | "context_checkpoint_percent";
 
 function isMapping(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
@@ -270,11 +272,9 @@ function applyLayer(
     (value) => `placement must be "split" or "window"; ignoring "${String(value)}".`);
   assignNullable("layout", (value) => isWindowLayout(value) ? value : undefined,
     (value) => `layout must be one of ${WINDOW_LAYOUTS.join(", ")}; ignoring "${String(value)}".`);
-  const terminalMessage = (value: unknown) => `terminal must be "tmux" or "rex"; ignoring "${String(value)}".`;
-  if (source === "project") assignNullable("terminal", (value) => isTerminal(value) ? value : undefined, terminalMessage);
-  else if (has("terminal") && root.terminal != null && !isTerminal(root.terminal)) warn(terminalMessage(root.terminal));
-  assignNullable("workers", (value) => value === "shown" || value === "hidden" ? value : undefined,
-    (value) => `workers must be "shown" or "hidden"; ignoring "${String(value)}".`);
+  applyTerminalKey(source, has("terminal"), root.terminal, assignNullable, warn);
+  assignNullable("workers", (value) => value === "shown" || value === "hidden" ? value : undefined, (value) => `workers must be "shown" or "hidden"; ignoring "${String(value)}".`);
+  assignNullable("retile", (value) => typeof value === "boolean" ? value : undefined, (value) => `retile must be true or false; ignoring "${String(value)}".`);
   assignNullable("profile", (value) => {
     const name = String(value).trim();
     return name !== "" && (name === NO_PROFILE || isValidProfileName(name)) ? name : undefined;
@@ -497,4 +497,12 @@ export function resolveCommandDir(projectPath: string, dir: string | null): stri
     throw new Error(`dir "${dir}" escapes the project root`);
   }
   return resolved;
+}
+
+type AssignNullable = (key: NullableField, valid: (value: unknown) => unknown, message: (value: unknown) => string) => void;
+
+function applyTerminalKey(source: "global" | "project", present: boolean, value: unknown, assign: AssignNullable, warn: (message: string) => void): void {
+  const message = (bad: unknown) => `terminal must be "tmux" or "rex"; ignoring "${String(bad)}".`;
+  if (source === "project") assign("terminal", (v) => (isTerminal(v) ? v : undefined), message);
+  else if (present && value != null && !isTerminal(value)) warn(message(value));
 }

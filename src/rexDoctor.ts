@@ -6,6 +6,7 @@ import { db } from "./db.js";
 import { loadProjectYml } from "./projectYml.js";
 import { REX_RESUME_RULE_NAME } from "./rexResume.js";
 import { REX_RULE_INSTALL, resumeRuleState } from "./rexResumeRule.js";
+import { rexRetileSetting } from "./rexRetile.js";
 import { resolveTerminal, type TerminalSource } from "./terminal.js";
 import {
   describeRexServer,
@@ -108,6 +109,10 @@ function reportResumeRule(r: DoctorReport): void {
 
 export function reportRex(r: DoctorReport, resolved: { terminal: string; source: TerminalSource }, projectPath: string | null): void {
   r.check("terminal", () => `${resolved.terminal} (from ${resolved.source})`);
+  r.check("retile", () => {
+    const retile = rexRetileSetting(projectPath ?? process.cwd());
+    return `${retile.on ? "on" : "off"} (${retile.source})`;
+  });
   const path = onPath(REX_PROGRAM);
   r.check("rex", () => {
     if (!path) throw new Error(`rex is not installed or not on PATH. ${REX_WAY_BACK}`);

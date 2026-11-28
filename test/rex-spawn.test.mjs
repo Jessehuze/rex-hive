@@ -204,8 +204,8 @@ describe("Rex leads", () => {
 });
 
 describe("Rex workers", () => {
-  it("agent_spawn under a Rex lead splits beside the lead and resizes nothing else", async () => {
-    const dir = freshProject("rex-split");
+  it("with retile: false, agent_spawn under a Rex lead splits beside the lead and moves or resizes nothing else", async () => {
+    const dir = freshProject("rex-split", "retile: false\n");
     const { project } = await startLead(dir);
     const { mcp, lead } = await leadMcp(dir, project);
     const session = fake.state().blocks[lead.tmux_target].session_id;
@@ -218,6 +218,7 @@ describe("Rex workers", () => {
     assert.equal(splits[0].params.anchor_id, lead.tmux_target);
     assert.deepEqual(splits[0].params.layout.block.options.size, { columns: 132, rows: 40 });
     assert.equal(calls.filter((c) => c.method === "session.resize_pane").length, 0);
+    assert.equal(calls.filter((c) => c.method === "session.move_block").length, 0);
     assert.equal(calls.filter((c) => c.method === "session.new_window").length, 0);
     const row = workerRow(project.id, "w-split");
     assert.equal(row.tmux_target, spawned.tmux_target);

@@ -42,7 +42,7 @@ import {
   waitForPaneEstablished,
   rowOwnership,
 } from "./terminal.js";
-import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexForgetShownAs, rexRefuseQuickExit, rexRememberShownAs, rexRelabel } from "./terminal/rex.js";
+import { commandArgv, envFromFlags, rexClose, rexCreatePane, rexForgetShownAs, rexRefuseQuickExit, rexRememberShownAs, rexRelabel } from "./terminal/rex.js"; import { rexCloseRetiled, rexRetileAfterPlace } from "./rexRetile.js";
 
 export function withWindowClaim<T>(claim: () => T): T {
   if (db.inTransaction) {
@@ -191,7 +191,7 @@ export function relayoutAfterPaneLeft(window: string | null): void {
 
 export function killAgentPane(target: string): void {
   const pane = isPaneTarget(target);
-
+  if (isRexTarget(target)) return rexCloseRetiled(target, () => killAgentPaneWithoutRelayout(target));
   const window = pane ? paneWindow(target) : null;
   killAgentPaneWithoutRelayout(target);
   relayoutAfterPaneLeft(window);
@@ -276,7 +276,7 @@ export type HiddenOutcome = "rex" | "tmux" | null;
 const workersHidden = (projectPath: string): boolean => loadProjectYml(projectPath).config?.workers === "hidden";
 
 function placeRexPane(
-  spec: Pick<LaunchSpec, "projectId" | "projectName" | "name" | "cwd" | "placement" | "retainOnExit"> & { hidden?: boolean; agentId?: number },
+  spec: Pick<LaunchSpec, "projectId" | "projectName" | "name" | "cwd" | "placement" | "layout" | "retainOnExit"> & { hidden?: boolean; agentId?: number },
   lead: { tmux_target: string },
   envFlags: string[],
   commandString: string,
@@ -295,7 +295,7 @@ function placeRexPane(
   }));
   if (hidden && spec.placement !== "processes") rexRememberShownAs(spec.projectId, placed.target, spec.placement as "split" | "window");
   return {
-    target: placed.target, pid: placed.pid, socket: placed.socket, landedInProjectId: null, layoutApplied: false,
+    target: placed.target, pid: placed.pid, socket: placed.socket, landedInProjectId: null, layoutApplied: rexRetileAfterPlace({ ...spec, hidden }, placed.target),
     inProcessesWindow: spec.placement === "processes", hidden: spec.hidden === true ? "rex" : null,
   };
 }

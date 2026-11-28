@@ -137,10 +137,13 @@ Rex session
 
 **Labels.** Blocks are labelled `<project>/<agent>`, `<project>/lead` or `<project>/<process>`. Labels are for people. hive's database is the source of truth.
 
-**hive does not re-tile.**
-- New splits go beside the lead and take space from the lead block only.
-- hive never resizes or moves any other pane.
-- `hive layout` applies the configured `layout` only when you run it, rebuilding the tab's arrangement from the layout tree.
+**hive re-tiles the lead's tab by default** (maintainer decision 2026-11-27, issue #40; this replaces "hive does not re-tile").
+- After a split worker is spawned, resumed or forked, a visible process starts in the split, `hive show` or `hive hide` runs (once per `--all`), or `agent_close`, `agent_park` or `hive stop` closes a split block, hive re-applies the configured `layout` (default `tiled`) through `rexLayoutPlan`/`rexApplyLayout`.
+- The anchor is always the project's lead block, verified live. When the new or closing block is not in the lead's tab, nothing is re-tiled.
+- It arranges the lead block plus the hive-owned, live, non-floating blocks already in the lead's tab. It never pulls a `placement: window` block into the tab and never touches other tabs. Blocks hive does not own are left out of the arrangement and may be displaced.
+- It runs after `withWindowClaim` has returned, so no store write lock is held across its Rex calls, and each of its Rex calls carries a 2 second `--timeout`: the plan stops at the first call that fails or times out, so a healthy server always finishes it and a hung one costs one short timeout. It is best-effort: errors are swallowed and never fail the spawn or close. The scheduler, the janitor and the lead's own end never re-tile.
+- `retile: false` (project or global `hive.yml`) restores the old behaviour: new splits take space from the lead block only, and hive never resizes or moves any other block outside `hive layout`. tmux ignores the key; it already re-tiles with `select-layout`.
+- `hive layout` still applies the configured `layout` on demand, gathering split blocks from every tab.
 - Exact tmux geometry is not a goal.
 
 **Attention indicators come free.** Rex marks unfocused tabs and sessions whose programs are working or blocked. That covers what `docs/tmux.md`'s bell and status-line recipe and `allow-passthrough` were for, with no configuration.

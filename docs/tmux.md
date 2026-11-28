@@ -161,7 +161,13 @@ Rex session
 
 - **The home tab.** hive records each project's tab. If Rex says that tab still exists, it is the home, wherever it now lives. Otherwise hive creates it, in the session of the calling block when `hive` runs inside Rex, and otherwise in a session labelled with hive's session name (`homeSession`, `src/terminal/rex.ts:940`). hive never renames a session it did not create.
 - **Labels.** Blocks are labelled `<project>/lead`, `<project>/<worker>` or `<project>/<process>`. Labels are for people; the store is the source of truth. `agent_rename` relabels the worker's block (`rexRelabel`, `src/terminal/rex.ts:1073`).
-- **No re-tiling.** A new split goes beside the lead and takes space from the lead block only. hive never moves or resizes a block you arranged. `hive layout` rebuilds the tab from the configured `layout` only when you run it (`rexApplyLayout`, `src/terminal/rex.ts:1478`).
+- **Re-tiling, on by default.** After each change to the lead's tab, hive re-applies the configured `layout` (default `tiled`) to the lead block and the hive-owned, live, non-floating blocks already in that tab, so the crew stays an even grid the way tmux's `select-layout` keeps it (`rexRetileTab`, `src/terminal/rex.ts:1694`). The changes are: a split worker spawned, resumed or forked, a visible process started, `hive show`, `hive hide` (once per `--all`), and `agent_close`, `agent_park` or `hive stop` of a split block. The maintainer turned this on by default on 2026-11-27.
+  - It always arranges around the project's lead block, and only while that block is live. A block that lands outside the lead's tab, such as a sub-worker split beside a `placement: window` worker, re-tiles nothing, and neither does its close.
+  - It never pulls a `placement: window` worker or process into the lead's tab, never touches a hidden (floating) block, and never touches another tab.
+  - A block in the lead's tab that hive does not own is left out of the arrangement, so it may be displaced as the blocks around it move.
+  - It is best-effort: a failed re-tile never fails the spawn or close it follows. It runs after the store's write lock is released, and each of its Rex calls carries a 2 second `--timeout`. The plan stops at the first call that fails or times out and leaves the rest for the next change, so a healthy server always finishes it and a hung one costs one short timeout. The scheduler, the janitor and the lead's own end (its processes stopped by SessionEnd or a lead pane exit) never re-tile, so a row closed that way is re-tiled by the next change or by `hive layout`.
+  - `retile: false` in the project or global `hive.yml` turns it off: hive then never moves or resizes a block outside `hive layout`, and a new split takes space from the lead block only. tmux ignores the key.
+  - `hive layout` still rebuilds the tab on demand, gathering live split blocks from every tab (`rexApplyLayout`, `src/terminal/rex.ts:1478`).
 - **Focus.** `hive attach`, `hive lead` and `hive next` focus the lead block, then ask a connected Rex app to switch to its session. With Remote Control off, or no app answering, hive prints the session and tab to open (`rexFocus`, `src/terminal/rex.ts:1649`). There are no view sessions and no `-CC`; `hive lead --detach` focuses nothing.
 
 ### Hide, show and peek
@@ -184,16 +190,17 @@ After a restart, Rex restores blocks and re-runs each program's registered resum
 
 ### Doctor
 
-`hive doctor` prints a Rex section when the effective terminal is Rex or any running row is on Rex (`rexDoctorSection`, `src/rexDoctor.ts:165`):
+`hive doctor` prints a Rex section when the effective terminal is Rex or any running row is on Rex (`rexDoctorSection`, `src/rexDoctor.ts:170`):
 
 | Line | Means |
 |---|---|
 | `terminal: rex (from <source>)` | the effective terminal and which rule above chose it |
+| `retile: on\|off (<source>)` | whether hive re-tiles the lead's tab (above), and whether `built-in`, `global` or `project` set it (`rexRetileSetting`, `src/rexRetile.ts:6`) |
 | `rex: <path>` | where `rex` resolves on PATH; FAIL when it does not |
 | `rex server: reachable, version V, api_revision N (minimum M)` | from `rex whoami --json`; FAIL when unreachable, warn when N is below M |
 | `rex blocks: K owned, G rows gone, O orphan blocks` | rows whose block is open, rows whose block is gone, and blocks labelled `<project>/…` with no row, each named with the `rex block close` command to clear it |
 | `rex resume rule: installed\|missing\|stale: names <word>\|unknown` | the restart-survival trust rule above; stale names the first word of the installed rule that differs from what hive records now, and missing and stale both name `hive setup --rex-resume --install` |
-| `rex session naming hook: off\|ON (workers may rename your session)` | whether Rex's SessionStart hook in a Claude settings file tells agents to name the session after their task (`sessionNamingOn`, `src/rexDoctor.ts:69`); with it ON, every worker may rename your session |
+| `rex session naming hook: off\|ON (workers may rename your session)` | whether Rex's SessionStart hook in a Claude settings file tells agents to name the session after their task (`sessionNamingOn`, `src/rexDoctor.ts:70`); with it ON, every worker may rename your session |
 | `rex reap` (info) | pending block reaps whose server has not answered for over 10 minutes, cleared (`rexClearStaleReaps`, `src/terminal/rex.ts:1110`) |
 
 tmux-only checks (the `tmux` version, `NO_COLOR`, scratch tmux servers, sessions, window stamps, view sessions) run only when tmux is the effective terminal or a running row is on tmux. A tmux-only setup's doctor output is unchanged.

@@ -3,7 +3,7 @@ import type { ProcessSnapshot, WorkerSubagents } from "./dashboard.js";
 import { db } from "./db.js";
 import { loadProjectYml } from "./projectYml.js";
 import { closeAgentRow, currentOwnership, killAgentPane, paneIdentity, relayoutAfterPaneLeft } from "./spawn.js";
-import { rexAwaitPorts, rexStopProcess, rexVisibilityAndPorts, rowServer, type RexPort } from "./terminal/rex.js";
+import { rexAwaitPorts, rexStopProcess, rexVisibilityAndPorts, rowServer, type RexPort } from "./terminal/rex.js"; import { rexCloseRetiled } from "./rexRetile.js";
 import {
   sessionName,
   type AliveSnapshot, type RowOwnership,
@@ -237,7 +237,7 @@ export function stopProcess(row: StoppableRow, reason: StopReason): StoppedProce
   if (ownership !== "live") return notOwned(row, ownership);
 
   markStopping(row.project_id, row.id);
-  if (isRexTarget(row.tmux_target)) return stopRexProcess(row, identity);
+  if (isRexTarget(row.tmux_target)) return stopRexProcess(row, identity, reason);
   const window = paneWindow(row.tmux_target);
   const beforeSignal = currentOwnership(row.id, identity);
   if (beforeSignal !== "live") {
@@ -279,7 +279,9 @@ export function stopProcess(row: StoppableRow, reason: StopReason): StoppedProce
 
 const REX_UNREACHABLE_NOTE = "Rex could not be reached during the stop, so hive left it running";
 
-function stopRexProcess(row: StoppableRow, identity: ReturnType<typeof paneIdentity>): StoppedProcess {
+const LEAD_ENDING: StopReason[] = [STOP_REASONS.leadSessionEnded, STOP_REASONS.leadPaneExited];
+
+function stopRexProcess(row: StoppableRow, identity: ReturnType<typeof paneIdentity>, reason: StopReason): StoppedProcess {
   const beforeSignal = currentOwnership(row.id, identity);
   if (beforeSignal !== "live") {
     clearStoppingMarker(row.project_id, row.id);
@@ -287,7 +289,8 @@ function stopRexProcess(row: StoppableRow, identity: ReturnType<typeof paneIdent
   }
   let stopped: { exited: boolean; gone: boolean };
   try {
-    stopped = rexStopProcess(row.tmux_target, STOP_GRACE_MS, rowServer(row.tmux_socket, row.tmux_target) ?? undefined);
+    const stop = () => rexStopProcess(row.tmux_target, STOP_GRACE_MS, rowServer(row.tmux_socket, row.tmux_target) ?? undefined);
+    stopped = LEAD_ENDING.includes(reason) ? stop() : rexCloseRetiled(row.tmux_target, stop);
   } catch {
     return { name: row.name, leg: "unreachable", note: REX_UNREACHABLE_NOTE };
   }
