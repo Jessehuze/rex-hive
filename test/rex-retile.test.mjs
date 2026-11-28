@@ -239,7 +239,7 @@ describe("retile on Rex (on by default)", () => {
     assert.deepEqual(asPlan(layoutCalls(mark)), planCalls(lead.tmux_target, [forked.tmux_target, resumed.tmux_target], "tiled"));
   });
 
-  it("a re-tile whose move_block fails leaves the spawn succeeded and its row running", async () => {
+  it("a re-tile whose first move_block fails stops there, with no further move or resize, and leaves the spawn succeeded and its row running", async () => {
     const dir = freshProject("retile-fail");
     const { project, lead } = await startLead(dir);
     await spawnFirst(dir, lead);
@@ -251,7 +251,7 @@ describe("retile on Rex (on by default)", () => {
     await mcp.start();
     const mark = realCalls().length;
     const spawned = await spawn(mcp, "fail-2");
-    assert.ok(layoutCalls(mark).some((c) => c.method === "session.move_block"), "the re-tile was attempted, so the failure path ran");
+    assert.deepEqual(layoutCalls(mark).map((c) => c.method), ["session.move_block"], "one failed move and nothing after it");
     const row = db.prepare("SELECT status, tmux_target FROM agents WHERE project_id = ? AND name = 'fail-2'").get(project.id);
     assert.equal(row.status, "running");
     assert.equal(row.tmux_target, spawned.tmux_target);
@@ -282,7 +282,7 @@ describe("retile on Rex (on by default)", () => {
     assert.deepEqual(layoutCalls(mark), []);
   });
 
-  it("a re-tile holds no store write lock: with move_block delayed 7s, another server's kv_set succeeds within 3s", async () => {
+  it("a re-tile holds no store write lock and abandons a slow call: with move_block delayed 7s, another server's kv_set succeeds within 3s and the spawn returns before the 7s are up", async () => {
     const dir = freshProject("retile-lock");
     const { lead, mcp } = await startLead(dir);
     await spawn(mcp, "lk-a");
@@ -294,21 +294,33 @@ describe("retile on Rex (on by default)", () => {
     const write = await mcp.call("kv_set", { key: "retile-probe", value: "1" }).then(() => "ok", (e) => String(e));
     assert.equal(write, "ok");
     assert.ok(Date.now() - started < 3000, `kv_set took ${Date.now() - started}ms`);
-    assert.ok((await spawning).ok, "the spawn itself still succeeds");
+    const outcome = await spawning;
+    assert.ok(outcome.ok, `the spawn itself still succeeds: ${outcome.err ?? ""}`);
+    assert.ok(Date.now() - started < 7000, `the spawn waited ${Date.now() - started}ms after the move began, so the delayed call was not abandoned`);
   });
 
-  it("a re-tile stops issuing calls once its time budget is spent: with move_block taking 1.5s, a five-worker grid makes fewer moves than its plan", async () => {
-    const dir = freshProject("retile-budget");
+  it("a healthy but slow Rex finishes the whole plan: with every move_block taking 800ms, a five-worker grid makes every planned move and resize", async () => {
+    const dir = freshProject("retile-slow-healthy");
     const { lead, mcp } = await startLead(dir);
     const workers = [];
-    for (const name of ["bd1", "bd2", "bd3", "bd4"]) workers.push((await spawn(mcp, name)).tmux_target);
-    const slow = await mcpAs(dir, lead.actor_id, { FAKE_REX_SLEEP_ON: "session.move_block:1500" });
+    for (const name of ["sh1", "sh2", "sh3", "sh4"]) workers.push((await spawn(mcp, name)).tmux_target);
+    const slow = await mcpAs(dir, lead.actor_id, { FAKE_REX_SLEEP_ON: "session.move_block:800" });
     const mark = realCalls().length;
-    const fifth = await spawn(slow, "bd5");
-    const planned = planCalls(lead.tmux_target, [...workers, fifth.tmux_target], "tiled").filter((c) => c.method === "session.move_block").length;
-    const moves = layoutCalls(mark).filter((c) => c.method === "session.move_block").length;
-    assert.ok(moves >= 1, "the re-tile started");
-    assert.ok(moves < planned, `made ${moves} of ${planned} planned moves`);
+    const fifth = await spawn(slow, "sh5");
+    assert.deepEqual(asPlan(layoutCalls(mark)), planCalls(lead.tmux_target, [...workers, fifth.tmux_target], "tiled"));
+  });
+
+  it("a re-tile stops at its first timed-out call: with move_block hanging 5s, the spawn attempts one move, no resize, and still succeeds", async () => {
+    const dir = freshProject("retile-hung");
+    const { project, lead, mcp } = await startLead(dir);
+    for (const name of ["hg1", "hg2", "hg3"]) await spawn(mcp, name);
+    const slow = await mcpAs(dir, lead.actor_id, { FAKE_REX_SLEEP_ON: "session.move_block:5000" });
+    const mark = realCalls().length;
+    const spawned = await spawn(slow, "hg4");
+    assert.deepEqual(layoutCalls(mark).map((c) => c.method), ["session.move_block"], "one timed-out move and nothing after it");
+    const row = db.prepare("SELECT status, tmux_target FROM agents WHERE project_id = ? AND name = 'hg4'").get(project.id);
+    assert.equal(row.status, "running");
+    assert.equal(row.tmux_target, spawned.tmux_target);
   });
 
   it("the lead's own end stops its processes without re-tiling", async () => {

@@ -69,13 +69,15 @@ function reportsIn(block) {
 
 const rowById = (id) => db.prepare("SELECT * FROM agents WHERE id = ?").get(id);
 
+const NO_BACKGROUND_TICK = "2147483647";
+
 async function startProject(name, extraEnv = {}) {
   const dir = mkdtempSync(join(dirname(dirs.projectDir), `${name}-`));
   const result = await runCli(["lead", dir, "--detach"], { cwd: dir, dataDir: dirs.dataDir, tmp: dirs.tmp, env: withClaude({ HIVE_TERMINAL: "rex", ...extraEnv }) });
   assert.equal(result.code, 0, result.stdout + result.stderr);
   const project = db.prepare("SELECT id, name, path FROM projects WHERE path = ?").get(dir);
   const lead = leadRow(db, project.id);
-  const mcp = new McpClient({ cwd: dir, dataDir: dirs.dataDir, env: withClaude({ HIVE_AGENT_ID: lead.actor_id, HIVE_SPAWN_READY_MS: "300", ...extraEnv }) });
+  const mcp = new McpClient({ cwd: dir, dataDir: dirs.dataDir, env: withClaude({ HIVE_AGENT_ID: lead.actor_id, HIVE_SPAWN_READY_MS: "300", HIVE_SCHEDULER_INTERVAL_MS: NO_BACKGROUND_TICK, ...extraEnv }) });
   clients.push(mcp);
   await mcp.start();
   const workerName = `${name}-w`;

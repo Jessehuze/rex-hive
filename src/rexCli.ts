@@ -75,14 +75,14 @@ function classify(err: unknown, verb: string, killMs: number, timeoutMs: number,
   return new RexError(`rex ${verb} failed: ${stderr || code}`, code, stderr);
 }
 
-function rexRun(server: string | null, args: string[], input?: string, failedOutput?: { stdout: string; status: number | null }): string {
+function rexRun(server: string | null, args: string[], input?: string, failedOutput?: { stdout: string; status: number | null }, timeoutOverride?: string): string {
   if (process.env.NODE_TEST_CONTEXT && !process.env.FAKE_REX_STATE) {
     throw new RexError("refusing to run rex under the test runner without isolateRex()", "test-isolation", "");
   }
-  const timeout = rexTimeout();
+  const timeout = timeoutOverride ?? rexTimeout();
   const argv = ["--autostart=false", "--timeout", timeout, ...(server ? ["-S", server] : []), ...args];
   const timeoutMs = durationMs(timeout);
-  const killMs = timeoutMs + KILL_MARGIN_MS;
+  const killMs = timeoutMs + (timeoutOverride ? SHORT_KILL_MARGIN_MS : KILL_MARGIN_MS);
   const started = Date.now();
   try {
     return execFileSync("rex", argv, {
@@ -113,10 +113,10 @@ function parseJson<T>(stdout: string, verb: string): T {
   }
 }
 
-export function rexApi<T>(server: string, method: string, params: object): T {
+export function rexApi<T>(server: string, method: string, params: object, timeout?: string): T {
   const json = JSON.stringify(params);
   const viaStdin = Buffer.byteLength(json) > STDIN_PARAMS_BYTES;
-  return parseJson<T>(rexRun(server, ["api", "call", method, viaStdin ? "-" : json], viaStdin ? json : undefined), method);
+  return parseJson<T>(rexRun(server, ["api", "call", method, viaStdin ? "-" : json], viaStdin ? json : undefined, undefined, timeout), method);
 }
 
 export function rexKey(server: string, block: string, key: string, session?: string): void {
@@ -223,3 +223,5 @@ for _, s in ipairs(listed.sessions or {}) do
 end
 return { version = 1, incomplete = incomplete, blocks = blocks }
 `;
+
+const SHORT_KILL_MARGIN_MS = 500;
